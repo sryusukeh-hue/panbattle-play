@@ -1,11 +1,13 @@
 import { LIMIT, clamp } from './config';
 export interface MotionSample { time: number; x: number | null; y: number | null; z: number | null }
 export const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
-// accelerationIncludingGravity - acceleration is the upward specific-force vector.
-// Use its screen-plane roll to avoid Euler gamma's ambiguity with a near-upright phone.
+// WebKit/CoreMotion and other implementations can report opposite gravity signs.
+// Normalize the portrait axis modulo 180 degrees; both signs give the same roll.
+// This also avoids Euler gamma's ambiguity with a near-upright phone.
 export function gravityRoll(x: number, y: number): number | null {
   if (!finite(x) || !finite(y) || Math.hypot(x, y) < 3) return null;
-  return Math.atan2(-x, y) * 180 / Math.PI;
+  const roll = Math.atan2(-x, y) * 180 / Math.PI;
+  return roll > 90 ? roll - 180 : roll < -90 ? roll + 180 : roll;
 }
 export class MotionFilter {
   sensitivity = 1; baseline: number | null = null; tilt = 0; rawTilt: number | null = null;

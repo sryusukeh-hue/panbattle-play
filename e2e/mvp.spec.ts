@@ -54,7 +54,7 @@ test('landscape, blur and long frame gaps suspend play and need manual resume', 
   await page.getByRole('button', { name: '再開する →' }).click();
   await page.evaluate(() => window.dispatchEvent(new Event('blur'))); await expect(page.locator('#app')).toHaveAttribute('data-screen', 'pause');
 });
-test('permission denial and missing real sensor data have distinct recovery paths', async ({ page }) => {
+test('permission denial and missing real sensor data have distinct recovery paths', async ({ page }, testInfo) => {
   await page.addInitScript(() => {
     Object.defineProperty(window, 'DeviceMotionEvent', { value: class { static requestPermission() { return Promise.resolve('denied'); } }, configurable: true });
     Object.defineProperty(window, 'DeviceOrientationEvent', { value: class { static requestPermission() { return Promise.resolve('granted'); } }, configurable: true });
@@ -66,6 +66,15 @@ test('permission denial and missing real sensor data have distinct recovery path
   await page.getByRole('button', { name: '動きの利用を許可する' }).click();
   await expect(page.getByText(/動き・傾きの値が届きません/)).toBeVisible({ timeout: 6000 });
   await expect(page.locator('#app')).toHaveAttribute('data-screen', 'permission');
+  await expect(page.locator('#permission-message')).toContainText('動き：未受信 / 傾き：未受信');
+  await page.setViewportSize({ width: 360, height: 640 });
+  await page.screenshot({ path: testInfo.outputPath('sensor-unavailable.png') });
+  const fallback = page.getByText('補助操作で遊ぶ', { exact: true });
+  await fallback.focus(); await page.keyboard.press('Enter');
+  await page.getByRole('button', { name: 'タッチ操作', exact: true }).focus(); await page.keyboard.press('Enter');
+  await expect(page.locator('#app')).toHaveAttribute('data-screen', 'calibrate');
+  await page.getByRole('button', { name: 'この位置で開始' }).click();
+  await expect(page.locator('#app')).toHaveAttribute('data-screen', 'select');
 });
 test('model loading and WebGL context failures freeze the game with retry', async ({ page }) => {
   await page.route('**/shokupan.glb', route => route.abort()); await page.goto('./?test=1');
@@ -140,6 +149,41 @@ test('synthetic sensor stream: permission, calibration, attack once, data loss, 
     const o = new Event('deviceorientation'); Object.defineProperty(o, 'gamma', { value: 0 }); window.dispatchEvent(o);
   });
   await page.waitForTimeout(200); expect((await page.evaluate(() => window.__panDiagnostics())).mode).toBe('touch');
+});
+for (const gravitySign of [-1, 1]) test(`portrait gravity sign ${gravitySign}: permission, calibration, tilt, attack and orientation fallback`, async ({ page }, testInfo) => {
+  await page.addInitScript(sign => {
+    (window.DeviceMotionEvent as any).requestPermission = () => Promise.resolve('granted');
+    (window.DeviceOrientationEvent as any).requestPermission = () => Promise.resolve('granted');
+    const fixture = (window as any).portraitSensor = { roll: 0, acceleration: 0, flat: false };
+    setInterval(() => {
+      const radians = fixture.roll * Math.PI / 180;
+      const motion = new Event('devicemotion');
+      Object.defineProperty(motion, 'acceleration', { value: { x: fixture.acceleration, y: 0, z: 0 } });
+      Object.defineProperty(motion, 'accelerationIncludingGravity', { value: {
+        x: fixture.acceleration - (fixture.flat ? 0 : sign * 9.8 * Math.sin(radians)),
+        y: fixture.flat ? 0 : sign * 9.8 * Math.cos(radians), z: fixture.flat ? sign * 9.8 : 0,
+      } });
+      window.dispatchEvent(motion);
+      const orientation = new Event('deviceorientation');
+      Object.defineProperty(orientation, 'gamma', { value: fixture.flat ? -20 : 0 });
+      window.dispatchEvent(orientation);
+    }, 16);
+  }, gravitySign);
+  await boot(page); await page.getByRole('button', { name: '食卓で勝負する →' }).click();
+  await page.getByRole('button', { name: '動きの利用を許可する' }).click();
+  await expect(page.getByText('動き・傾きの入力を受信しています ✓')).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('sensor-ready.png') });
+  await page.getByRole('button', { name: 'この位置で開始' }).click(); await fight(page);
+  await page.evaluate(() => { window.__panTest.battle.cpuEnabled = false; (window as any).portraitSensor.roll = 25; });
+  await expect.poll(() => page.evaluate(() => window.__panTest.battle.player.x)).toBeGreaterThan(.8);
+  await page.evaluate(() => { (window as any).portraitSensor.roll = 0; });
+  await expect.poll(() => page.evaluate(() => Math.abs(window.__panTest.battle.player.x))).toBeLessThan(.1);
+  await page.evaluate(() => { (window as any).portraitSensor.acceleration = 8; });
+  await expect(page.locator('#cpu-hp')).toHaveText('82');
+  await page.evaluate(() => { (window as any).portraitSensor.acceleration = 0; (window as any).portraitSensor.flat = true; });
+  await expect.poll(() => page.evaluate(() => window.__panTest.battle.player.x)).toBeLessThan(-.5);
+  expect((await page.evaluate(() => window.__panDiagnostics())).sensorAttacks).toBe(1);
+  await expect(page.locator('#app')).toHaveAttribute('data-screen', 'battle');
 });
 for (const width of [360, 390, 430]) test(`all bread silhouettes stay within portrait view at lateral extremes, attack and recoil at ${width}px`, async ({ page }, testInfo) => {
   await boot(page); await select(page); await fight(page);

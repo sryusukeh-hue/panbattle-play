@@ -7,7 +7,7 @@ export class GameInput {
   detectedAt = -Infinity; private left = false; private right = false;
   private pointerDirections = new Map<number, number>(); private held = new Set<string>();
   private attached = false;
-  private usesGravity = false;
+  private lastGravityAt = -Infinity;
   constructor(controls: HTMLElement, private pause: () => void) {
     window.addEventListener('keydown', e => {
       if (e.code === 'Escape') { e.preventDefault(); this.pause(); return; }
@@ -42,14 +42,11 @@ export class GameInput {
   clear(): void { this.pending = false; this.held.clear(); this.keys(); this.pointerDirections.clear(); this.sensor.reset(); }
   setEnabled(enabled: boolean): void { if (this.enabled !== enabled) this.clear(); this.enabled = enabled; }
   async request(): Promise<void> {
-    this.clear(); this.sensor.baseline = null; this.usesGravity = false;
+    this.clear(); this.sensor.baseline = null; this.lastGravityAt = -Infinity;
     if (!window.isSecureContext) throw new Error('動きの操作にはHTTPSが必要です。HTTPSで開き直すか、補助操作を選んでください。');
     if (!('DeviceMotionEvent' in window) || !('DeviceOrientationEvent' in window)) throw new Error('このブラウザーは動きの取得に対応していません。補助操作を選んでください。');
-    const motion = DeviceMotionEvent as unknown as SensorConstructor, orientation = DeviceOrientationEvent as unknown as SensorConstructor;
-    // Both calls occur before the first await, within the click's transient user activation.
-    const requests = [motion.requestPermission?.() ?? Promise.resolve('granted'), orientation.requestPermission?.() ?? Promise.resolve('granted')];
-    const answers = await Promise.all(requests);
-    if (answers.some(answer => answer !== 'granted')) throw new Error('動きの利用が許可されませんでした。Safariで許可を確認して再試行するか、タッチ操作を選べます。');
+    // Listen before requesting permission so the first valid samples are retained.
+    this.sensor.lastMotion = this.sensor.lastOrientation = -Infinity;
     if (!this.attached) {
       window.addEventListener('devicemotion', e => {
         const a = e.acceleration, now = performance.now();
@@ -57,18 +54,30 @@ export class GameInput {
         const g = e.accelerationIncludingGravity;
         if (finite(g?.x) && finite(g?.y) && finite(a?.x) && finite(a?.y)) {
           const roll = gravityRoll(g.x - a.x, g.y - a.y);
-          if (roll !== null) { this.sensor.orientation(roll, now); this.usesGravity = true; }
+          if (roll !== null) { this.sensor.orientation(roll, now); this.lastGravityAt = now; }
         }
       });
-      window.addEventListener('deviceorientation', e => { if (!this.usesGravity) this.sensor.orientation(e.gamma, performance.now()); });
+      window.addEventListener('deviceorientation', e => {
+        const now = performance.now();
+        // A flat pose or a missing gravity component must not disable valid gamma forever.
+        if (now - this.lastGravityAt > 250) this.sensor.orientation(e.gamma, now);
+      });
       this.attached = true;
     }
-    this.sensor.lastMotion = this.sensor.lastOrientation = -Infinity;
+    const motion = DeviceMotionEvent as unknown as SensorConstructor, orientation = DeviceOrientationEvent as unknown as SensorConstructor;
+    // Both calls occur before the first await, within the click's transient user activation.
+    const requests = [motion.requestPermission?.() ?? Promise.resolve('granted'), orientation.requestPermission?.() ?? Promise.resolve('granted')];
+    const answers = await Promise.all(requests);
+    if (answers.some(answer => answer !== 'granted')) throw new Error('動きの利用が許可されませんでした。Safariで許可を確認して再試行するか、タッチ操作を選べます。');
     const start = performance.now();
     await new Promise<void>((resolve, reject) => {
       const check = (): void => {
         if (this.sensor.fresh(performance.now())) resolve();
-        else if (performance.now() - start > 3500) reject(new Error('許可は確認できましたが、動き・傾きの値が届きません。Safariで再確認するか、補助操作を選んでください。'));
+        else if (performance.now() - start > 3500) {
+          const now = performance.now();
+          const received = `動き：${now - this.sensor.lastMotion < 800 ? '受信' : '未受信'} / 傾き：${now - this.sensor.lastOrientation < 800 ? '受信' : '未受信'}`;
+          reject(new Error(`許可は確認できましたが、動き・傾きの値が届きません。${received}。Safariで再確認するか、補助操作を選んでください。`));
+        }
         else setTimeout(check, 80);
       }; check();
     });

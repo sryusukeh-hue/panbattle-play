@@ -8,6 +8,15 @@ describe('3D motion discrimination', () => {
     expect(gravityRoll(0, 9.8)).toBeCloseTo(0); expect(gravityRoll(-4.9, 8.487)).toBeCloseTo(30, 1);
     expect(gravityRoll(3, 5.196)).toBeCloseTo(-30, 1); expect(gravityRoll(0, 1)).toBeNull(); expect(gravityRoll(NaN, 5)).toBeNull();
   });
+  it('accepts both gravity signs in portrait without rejecting iOS upright samples', () => {
+    for (const angle of [-45, -25, 0, 25, 45]) for (const sign of [-1, 1]) {
+      const radians = angle * Math.PI / 180;
+      const roll = gravityRoll(-sign * 9.8 * Math.sin(radians), sign * 9.8 * Math.cos(radians));
+      expect(roll).toBeCloseTo(angle);
+      const f = new MotionFilter(); quiet(f, 0); f.orientation(roll, 650);
+      expect(f.fresh(660)).toBe(true); expect(f.calibrate(660)).toBe(true);
+    }
+  });
   it('detects 20 small gestures exactly once each including return movement', () => {
     const f = new MotionFilter(); let count = 0;
     for (let i = 0; i < 20; i++) {
