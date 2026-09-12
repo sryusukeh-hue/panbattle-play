@@ -1,0 +1,8 @@
+node_modules/
+dist-3d/
+coverage/
+*.log
+.npm-cache/
+tmp/
+test-results/
+playwright-report/
