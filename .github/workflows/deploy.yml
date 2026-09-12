@@ -29,6 +29,14 @@ jobs:
       - run: npm run check:size
       - run: npm run test:browser:install -- --with-deps
       - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-test-failure
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 7
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

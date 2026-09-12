@@ -83,10 +83,9 @@ test('storage failure is visible, settings and result still work', async ({ page
   await page.evaluate(() => { window.__panTest.battle.elapsed = 59.99; }); await expect(page.locator('#app')).toHaveAttribute('data-screen', 'result');
   await expect(page.getByRole('button', { name: '同じパンで、もう一戦 →' })).toBeVisible();
 });
-test('three breads, 360/390/430 widths and all opponent combinations render without errors', async ({ page }, testInfo) => {
+for (const width of [360, 390, 430]) test(`three breads and all opponent combinations render without errors at ${width}px`, async ({ page }, testInfo) => {
   const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
   await boot(page); await page.screenshot({ path: testInfo.outputPath('title.png') }); await select(page);
-  for (const width of [360, 390, 430]) {
     await page.setViewportSize({ width, height: 844 });
     for (const player of ['shokupan', 'francepan', 'croissant']) {
       await page.locator(`[data-bread="${player}"]`).click();
@@ -95,7 +94,6 @@ test('three breads, 360/390/430 widths and all opponent combinations render with
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       }
     }
-  }
   await page.screenshot({ path: testInfo.outputPath('selection.png') });
   await fight(page); await page.screenshot({ path: testInfo.outputPath('battle.png') });
   expect(errors).toEqual([]);
@@ -143,9 +141,8 @@ test('synthetic sensor stream: permission, calibration, attack once, data loss, 
   });
   await page.waitForTimeout(200); expect((await page.evaluate(() => window.__panDiagnostics())).mode).toBe('touch');
 });
-test('all bread silhouettes stay within portrait view at lateral extremes, attack and recoil', async ({ page }, testInfo) => {
+for (const width of [360, 390, 430]) test(`all bread silhouettes stay within portrait view at lateral extremes, attack and recoil at ${width}px`, async ({ page }, testInfo) => {
   await boot(page); await select(page); await fight(page);
-  for (const width of [360, 390, 430]) {
     await page.setViewportSize({ width, height: 844 });
     for (const bread of ['shokupan', 'francepan', 'croissant']) for (const x of [-1.15, 0, 1.15]) for (const state of ['ready', 'attack', 'recoil']) {
       await page.evaluate(({ bread, x, state }) => {
@@ -166,7 +163,6 @@ test('all bread silhouettes stay within portrait view at lateral extremes, attac
       }
       if (width === 390 && x === 0) await page.screenshot({ path: testInfo.outputPath(`${bread}-${state}.png`) });
     }
-  }
 });
 test('three rematches compare past records, persist after reload and never save an abandoned match', async ({ page }, testInfo) => {
   await boot(page); await select(page); await fight(page);
