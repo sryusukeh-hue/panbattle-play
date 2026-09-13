@@ -4,14 +4,28 @@ declare global { interface Window { __panTest: any; __panDiagnostics: () => any 
 async function boot(page: Page): Promise<void> {
   await page.goto('./?test=1'); await expect(page.getByRole('button', { name: '食卓で勝負する →' })).toBeEnabled();
 }
+// Synthetic 16ms sensor samples and short counter windows use browser time.
+// CI software rendering must not turn a valid fixture into missing sensor data.
+async function bootWithClock(page: Page): Promise<void> {
+  await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') });
+  await boot(page); await page.clock.pauseAt(new Date('2026-01-01T01:00:00Z'));
+}
+async function advanceUntil(page: Page, ready: () => Promise<boolean>): Promise<void> {
+  for (let elapsed = 0; elapsed < 5000; elapsed += 50) {
+    if (await ready()) return;
+    await page.clock.runFor(50);
+  }
+  expect(await ready(), 'condition within 5 seconds of browser time').toBe(true);
+}
 async function select(page: Page, mode = 'タッチ操作'): Promise<void> {
   await page.getByRole('button', { name: '食卓で勝負する →' }).click();
   await page.getByText('補助操作で遊ぶ', { exact: true }).click(); await page.getByRole('button', { name: mode, exact: true }).click();
   await page.getByRole('button', { name: 'この位置で開始' }).click();
 }
-async function fight(page: Page): Promise<void> {
+async function fight(page: Page, clock = false): Promise<void> {
   await page.getByRole('button', { name: 'まずは短い練習へ →' }).click();
   await page.getByRole('button', { name: '練習をスキップして対戦' }).click();
+  if (clock) await page.clock.runFor(3100);
   await expect(page.locator('#app')).toHaveAttribute('data-screen', 'battle', { timeout: 6000 });
 }
 test('first run, keyboard combat, pause/resume, result, rematch and legacy save', async ({ page }) => {
@@ -108,21 +122,29 @@ for (const width of [360, 390, 430]) test(`three breads and all opponent combina
   expect(errors).toEqual([]);
 });
 test('practice teaches attack/dodge/counter, never damages, supports replay and skip', async ({ page }) => {
-  await boot(page); await select(page, 'キーボード');
+  await bootWithClock(page); await select(page, 'キーボード');
   await page.getByRole('button', { name: 'まずは短い練習へ →' }).click(); await page.getByRole('button', { name: '練習をはじめる' }).click();
-  await page.keyboard.press('Space'); await expect(page.locator('#play-tip')).toContainText('2 / 3');
+  await page.keyboard.press('Space');
+  await advanceUntil(page, () => page.locator('#play-tip').evaluate(e => e.textContent!.includes('2 / 3')));
   // Wait for the actual CPU anticipation, then use normal keyboard events.
-  await expect.poll(() => page.evaluate(() => !!window.__panTest.battle.cpu.attack)).toBe(true);
-  await page.keyboard.down('ArrowRight'); await expect(page.locator('#play-tip')).toContainText('3 / 3');
+  await advanceUntil(page, () => page.evaluate(() => {
+    const attack = window.__panTest.battle.cpu.attack;
+    return !!attack && attack.age < .2;
+  }));
+  await page.keyboard.down('ArrowRight');
+  await advanceUntil(page, () => page.locator('#play-tip').evaluate(e => e.textContent!.includes('3 / 3')));
   await page.keyboard.up('ArrowRight'); await page.keyboard.press('Space');
+  await advanceUntil(page, () => page.getByRole('heading', { name: 'いい構え！' }).isVisible());
   await expect(page.getByRole('heading', { name: 'いい構え！' })).toBeVisible();
   expect((await page.evaluate(() => window.__panDiagnostics())).hp).toEqual([100, 100]);
   expect(await page.evaluate(() => Object.keys(window.__panTest.save.data.best))).toEqual([]);
   await page.getByRole('button', { name: 'もう一度練習' }).click(); await expect(page.locator('#play-tip')).toContainText('1 / 3');
-  await page.getByRole('button', { name: '練習をスキップ' }).click(); await expect(page.locator('#app')).toHaveAttribute('data-screen', 'battle', { timeout: 6000 });
+  await page.getByRole('button', { name: '練習をスキップ' }).click(); await page.clock.runFor(3100);
+  await expect(page.locator('#app')).toHaveAttribute('data-screen', 'battle');
 });
 test('synthetic sensor stream: permission, calibration, attack once, data loss, and late permission cancellation', async ({ page }) => {
-  await page.addInitScript(() => {
+  await bootWithClock(page);
+  await page.evaluate(() => {
     (window.DeviceMotionEvent as any).requestPermission = () => Promise.resolve('granted');
     (window.DeviceOrientationEvent as any).requestPermission = () => Promise.resolve('granted');
     (window as any).testAcceleration = 0;
@@ -131,14 +153,17 @@ test('synthetic sensor stream: permission, calibration, attack once, data loss, 
       const orientation = new Event('deviceorientation'); Object.defineProperty(orientation, 'gamma', { value: 0 }); window.dispatchEvent(orientation);
     }, 16);
   });
-  await boot(page); await page.getByRole('button', { name: '食卓で勝負する →' }).click(); await page.getByRole('button', { name: '動きの利用を許可する' }).click();
-  await expect(page.getByText('動き・傾きの入力を受信しています ✓')).toBeVisible(); await page.getByRole('button', { name: 'この位置で開始' }).click(); await fight(page);
-  await page.evaluate(() => { window.__panTest.battle.cpuEnabled = false; }); await page.waitForTimeout(300);
-  await page.evaluate(() => { (window as any).testAcceleration = 8; }); await page.waitForTimeout(70);
-  await page.evaluate(() => { (window as any).testAcceleration = -9; }); await page.waitForTimeout(70);
-  await page.evaluate(() => { (window as any).testAcceleration = 0; }); await expect(page.locator('#cpu-hp')).toHaveText('82');
+  await page.getByRole('button', { name: '食卓で勝負する →' }).click(); await page.getByRole('button', { name: '動きの利用を許可する' }).click();
+  await advanceUntil(page, () => page.getByText('動き・傾きの入力を受信しています ✓').isVisible());
+  await expect(page.getByText('動き・傾きの入力を受信しています ✓')).toBeVisible(); await page.getByRole('button', { name: 'この位置で開始' }).click(); await fight(page, true);
+  await page.evaluate(() => { window.__panTest.battle.cpuEnabled = false; }); await page.clock.runFor(300);
+  await page.evaluate(() => { (window as any).testAcceleration = 8; }); await page.clock.runFor(70);
+  await page.evaluate(() => { (window as any).testAcceleration = -9; }); await page.clock.runFor(70);
+  await page.evaluate(() => { (window as any).testAcceleration = 0; }); await page.clock.runFor(600);
+  await expect(page.locator('#cpu-hp')).toHaveText('82');
   expect((await page.evaluate(() => window.__panDiagnostics())).sensorAttacks).toBe(1);
-  await page.evaluate(() => clearInterval((window as any).sensorTimer)); await expect(page.locator('#app')).toHaveAttribute('data-screen', 'pause');
+  await page.evaluate(() => clearInterval((window as any).sensorTimer)); await page.clock.runFor(850);
+  await expect(page.locator('#app')).toHaveAttribute('data-screen', 'pause');
   await expect(page.getByText(/動きの入力が途切れました/)).toBeVisible();
   await page.getByRole('button', { name: '操作方式を選び直す', exact: true }).click();
   await page.getByRole('button', { name: '動きの利用を許可する' }).click();
@@ -148,10 +173,11 @@ test('synthetic sensor stream: permission, calibration, attack once, data loss, 
     const m = new Event('devicemotion'); Object.defineProperty(m, 'acceleration', { value: { x: 0, y: 0, z: 0 } }); window.dispatchEvent(m);
     const o = new Event('deviceorientation'); Object.defineProperty(o, 'gamma', { value: 0 }); window.dispatchEvent(o);
   });
-  await page.waitForTimeout(200); expect((await page.evaluate(() => window.__panDiagnostics())).mode).toBe('touch');
+  await page.clock.runFor(200); expect((await page.evaluate(() => window.__panDiagnostics())).mode).toBe('touch');
 });
 for (const gravitySign of [-1, 1]) test(`portrait gravity sign ${gravitySign}: permission, calibration, tilt, attack and orientation fallback`, async ({ page }, testInfo) => {
-  await page.addInitScript(sign => {
+  await bootWithClock(page);
+  await page.evaluate(sign => {
     (window.DeviceMotionEvent as any).requestPermission = () => Promise.resolve('granted');
     (window.DeviceOrientationEvent as any).requestPermission = () => Promise.resolve('granted');
     const fixture = (window as any).portraitSensor = { roll: 0, acceleration: 0, flat: false };
@@ -169,19 +195,21 @@ for (const gravitySign of [-1, 1]) test(`portrait gravity sign ${gravitySign}: p
       window.dispatchEvent(orientation);
     }, 16);
   }, gravitySign);
-  await boot(page); await page.getByRole('button', { name: '食卓で勝負する →' }).click();
+  await page.getByRole('button', { name: '食卓で勝負する →' }).click();
   await page.getByRole('button', { name: '動きの利用を許可する' }).click();
+  await advanceUntil(page, () => page.getByText('動き・傾きの入力を受信しています ✓').isVisible());
   await expect(page.getByText('動き・傾きの入力を受信しています ✓')).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('sensor-ready.png') });
-  await page.getByRole('button', { name: 'この位置で開始' }).click(); await fight(page);
+  await page.getByRole('button', { name: 'この位置で開始' }).click(); await fight(page, true);
   await page.evaluate(() => { window.__panTest.battle.cpuEnabled = false; (window as any).portraitSensor.roll = 25; });
-  await expect.poll(() => page.evaluate(() => window.__panTest.battle.player.x)).toBeGreaterThan(.8);
+  await advanceUntil(page, () => page.evaluate(() => window.__panTest.battle.player.x > .8));
   await page.evaluate(() => { (window as any).portraitSensor.roll = 0; });
-  await expect.poll(() => page.evaluate(() => Math.abs(window.__panTest.battle.player.x))).toBeLessThan(.1);
+  await advanceUntil(page, () => page.evaluate(() => Math.abs(window.__panTest.battle.player.x) < .1));
   await page.evaluate(() => { (window as any).portraitSensor.acceleration = 8; });
+  await page.clock.runFor(700);
   await expect(page.locator('#cpu-hp')).toHaveText('82');
   await page.evaluate(() => { (window as any).portraitSensor.acceleration = 0; (window as any).portraitSensor.flat = true; });
-  await expect.poll(() => page.evaluate(() => window.__panTest.battle.player.x)).toBeLessThan(-.5);
+  await advanceUntil(page, () => page.evaluate(() => window.__panTest.battle.player.x < -.5));
   expect((await page.evaluate(() => window.__panDiagnostics())).sensorAttacks).toBe(1);
   await expect(page.locator('#app')).toHaveAttribute('data-screen', 'battle');
 });
