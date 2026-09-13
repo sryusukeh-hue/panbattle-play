@@ -4,11 +4,12 @@ import { GameInput } from './input';
 let input: GameInput;
 let events: EventTarget;
 let permission: ReturnType<typeof vi.fn>;
-function motion(sign = -1): void {
+function motion(sign = -1, roll = 0, acceleration = 0): void {
   const event = new Event('devicemotion');
+  const angle = roll * Math.PI / 180;
   Object.defineProperties(event, {
-    acceleration: { value: { x: 0, y: 0, z: 0 } },
-    accelerationIncludingGravity: { value: { x: 0, y: sign * 9.8, z: 0 } },
+    acceleration: { value: { x: acceleration, y: 0, z: 0 } },
+    accelerationIncludingGravity: { value: { x: acceleration - sign * 9.8 * Math.sin(angle), y: sign * 9.8 * Math.cos(angle), z: 0 } },
   });
   events.dispatchEvent(event);
 }
@@ -28,6 +29,23 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('sensor permission and actual input reception', () => {
+  it('uses same-event gravity to reject a quick dodge and accepts the following counter once', async () => {
+    const request = input.request(); await vi.advanceTimersByTimeAsync(0);
+    motion(); await vi.advanceTimersByTimeAsync(80); await request;
+    input.mode = 'sensor'; input.sensor.calibrate(performance.now()); input.setEnabled(true);
+    for (let t = 0; t < 650; t += 10) { vi.advanceTimersByTime(10); motion(); expect(input.consume()).toBe(false); }
+    for (let t = 10; t <= 100; t += 10) {
+      vi.advanceTimersByTime(10); motion(-1, Math.min(24, t * .4), t < 60 ? 12 : 0);
+      expect(input.consume()).toBe(false);
+    }
+    expect(input.target()).toBeGreaterThan(0);
+    for (let t = 0; t < 300; t += 10) { vi.advanceTimersByTime(10); motion(-1, 24); expect(input.consume()).toBe(false); }
+    vi.advanceTimersByTime(10); motion(-1, 24, 8); expect(input.consume()).toBe(false);
+    let count = 0;
+    for (let t = 10; t <= 100; t += 10) { vi.advanceTimersByTime(10); motion(-1, 24, t === 60 ? -10 : 0); count += Number(input.consume()); }
+    expect(count).toBe(1); expect(input.consume()).toBe(false);
+    expect(input.sensor.attacks).toBe(1);
+  });
   it.each([-1, 1])('accepts upright gravity sign %s without separate orientation events', async sign => {
     const request = input.request(); await vi.advanceTimersByTimeAsync(0);
     motion(sign); await vi.advanceTimersByTimeAsync(80); await request;

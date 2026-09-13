@@ -6,6 +6,27 @@ function memory() {
   return { map, getItem: (key: string) => map.get(key) ?? null, setItem: (key: string, value: string) => { map.set(key, value); } };
 }
 describe('separate 3D save and scores', () => {
+  it('migrates old shared sensitivity without changing records, choices or the old field', () => {
+    const storage = memory();
+    const { attackSensitivity: _attack, tiltSensitivity: _tilt, ...old } = defaults();
+    const value = { ...old, sensitivity: 1.3, sound: true, practiced: true, bread: 'francepan', best: {
+      [condition('francepan', 'shokupan', 'sensor')]: { dodge: { success: 2, opportunities: 3 } },
+    } };
+    storage.setItem(SAVE_KEY, JSON.stringify(value));
+    const store = new SaveStore(() => storage);
+    expect(store.data).toEqual({ ...value, attackSensitivity: 1.3, tiltSensitivity: 1.3 });
+    expect(storage.getItem(SAVE_KEY)).toBe(JSON.stringify(value));
+    store.data.attackSensitivity = .7; store.persist();
+    const reopened = new SaveStore(() => storage);
+    expect(reopened.data.attackSensitivity).toBe(.7); expect(reopened.data.tiltSensitivity).toBe(1.3);
+    expect(reopened.data.sensitivity).toBe(1.3); expect(reopened.data.best).toEqual(value.best);
+  });
+  it.each(['attackSensitivity', 'tiltSensitivity'])('preserves invalid %s data', field => {
+    for (const value of [null, '1', .5, 1.7]) {
+      const storage = memory(), raw = JSON.stringify({ ...defaults(), [field]: value }); storage.setItem(SAVE_KEY, raw);
+      const store = new SaveStore(() => storage); expect(store.persist()).toBe(false); expect(storage.getItem(SAVE_KEY)).toBe(raw);
+    }
+  });
   it('preserves legacy bytes and separates bread/opponent/mode/rule comparisons', () => {
     const storage = memory(), store = new SaveStore(() => storage), b = new Battle('shokupan', 'francepan'); b.outcome = 'win';
     b.scores.dodge = { success: 3, opportunities: 4 };

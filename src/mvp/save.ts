@@ -1,8 +1,8 @@
 import { BREAD_IDS, RULE, type BreadId, type Mode } from './config';
 import { type Battle, type Metric, type Scores } from './battle';
 export const SAVE_KEY = 'panbattle.3d.v1';
-export interface Saved { version: 1; sound: boolean; sensitivity: number; bread: BreadId; cpu: BreadId; practiced: boolean; best: Record<string, Partial<Scores>> }
-export const defaults = (): Saved => ({ version: 1, sound: false, sensitivity: 1, bread: 'shokupan', cpu: 'shokupan', practiced: false, best: {} });
+export interface Saved { version: 1; sound: boolean; sensitivity: number; attackSensitivity: number; tiltSensitivity: number; bread: BreadId; cpu: BreadId; practiced: boolean; best: Record<string, Partial<Scores>> }
+export const defaults = (): Saved => ({ version: 1, sound: false, sensitivity: 1, attackSensitivity: 1, tiltSensitivity: 1, bread: 'shokupan', cpu: 'shokupan', practiced: false, best: {} });
 export const condition = (player: BreadId, cpu: BreadId, mode: Mode): string => `${RULE}/${player}/${cpu}/gentle/${mode}`;
 export const rate = (m: Metric | undefined): number | null => m && m.opportunities > 0 ? m.success / m.opportunities : null;
 function validMetric(m: unknown): m is Metric {
@@ -21,7 +21,10 @@ export class SaveStore {
       for (const [key, scores] of Object.entries(value.best)) {
         if (!/^table-1\/(shokupan|francepan|croissant)\/(shokupan|francepan|croissant)\/gentle\/(sensor|touch|keyboard)$/.test(key) || !scores || typeof scores !== 'object' || (scores.dodge !== undefined && !validMetric(scores.dodge)) || (scores.counter !== undefined && !validMetric(scores.counter))) throw new Error('invalid');
       }
-      this.data = value;
+      const sensitivities = { attackSensitivity: value.attackSensitivity === undefined ? value.sensitivity : value.attackSensitivity,
+        tiltSensitivity: value.tiltSensitivity === undefined ? value.sensitivity : value.tiltSensitivity };
+      if (Object.values(sensitivities).some(v => !Number.isFinite(v) || v < .6 || v > 1.6)) throw new Error('invalid');
+      this.data = { ...value, ...sensitivities };
     } catch { this.warning = '保存データを読み込めません。この回は端末に保存せず遊べます。元のデータは保持しています。'; }
   }
   persist(): boolean {

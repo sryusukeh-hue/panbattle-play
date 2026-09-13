@@ -1,9 +1,10 @@
 import './style.css';
 import { BREADS, BREAD_IDS, RULE, type BreadId, type Mode } from './config';
-import { Battle, phase, type Scores } from './battle';
+import { Battle, phase, type Scores, type BattleEvent } from './battle';
 import { GameInput } from './input';
 import { SaveStore, rate } from './save';
 import { TableRenderer } from './renderer';
+import { BattleAudio } from './audio';
 
 type Screen = 'title' | 'permission' | 'calibrate' | 'select' | 'practice-intro' | 'practice' | 'practice-done' | 'countdown' | 'battle' | 'pause' | 'settings' | 'result' | 'error';
 const app = document.querySelector<HTMLElement>('#app')!;
@@ -21,32 +22,33 @@ let battle = new Battle(save.data.bread, save.data.cpu);
 let renderer: TableRenderer | undefined; let ready = false; let fatal = ''; let message = '';
 let practiceRequested = false; let calibrationReturn: Screen = 'select'; let permissionToken = 0; let permissionBusy = false;
 let countdown = 3; let last = performance.now(); let toastUntil = 0; let previousBest: Partial<Scores> = {};
-let practiceStage = 0; let acceptedAt: number | null = null; let audio: AudioContext | undefined;
-let soundUnavailable = false; let lastSound = -Infinity;
+let practiceStage = 0; let acceptedAt: number | null = null;
+const audio = new BattleAudio(() => save.data.sound, () => say('音を再生できません。画面の合図で遊べます。', 3));
+let notices: BattleEvent[] = [];
 const input = new GameInput(controls, () => { if (['battle', 'practice', 'countdown'].includes(screen)) pause('一時停止'); });
-input.sensor.sensitivity = save.data.sensitivity;
+input.sensor.attackSensitivity = save.data.attackSensitivity;
+input.sensor.tiltSensitivity = save.data.tiltSensitivity;
 const modes: Record<Mode, string> = { sensor: '振る・傾ける', touch: 'タッチ', keyboard: 'キーボード' };
 const emoji: Record<BreadId, string> = { shokupan: '🍞', francepan: '🥖', croissant: '🥐' };
 const button = (action: string, label: string, secondary = false): string => `<button data-action="${action}" class="${secondary ? 'secondary' : 'primary'}">${label}</button>`;
 const header = (eyebrow: string, title: string, description = ''): string => `<div class="eyebrow">${eyebrow}</div><h1>${title}</h1>${description ? `<p>${description}</p>` : ''}`;
 function say(text: string, seconds = 1.2): void { toast.textContent = text; toastUntil = performance.now() + seconds * 1000; }
-function beep(kind: 'hit' | 'attack' | 'counter'): void {
-  if (!save.data.sound || soundUnavailable || !audio || audio.state !== 'running' || performance.now() - lastSound < 55) return;
-  try {
-    const oscillator = audio.createOscillator(), gain = audio.createGain(); oscillator.connect(gain); gain.connect(audio.destination);
-    oscillator.type = kind === 'hit' ? 'triangle' : 'sine'; oscillator.frequency.setValueAtTime(kind === 'counter' ? 730 : kind === 'hit' ? 185 : 320, audio.currentTime);
-    oscillator.frequency.exponentialRampToValueAtTime(80, audio.currentTime + .12); gain.gain.setValueAtTime(.07, audio.currentTime); gain.gain.exponentialRampToValueAtTime(.001, audio.currentTime + .14);
-    oscillator.start(); oscillator.stop(audio.currentTime + .15); oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); }; lastSound = performance.now();
-  } catch { soundUnavailable = true; say('音を再生できません。画面の合図で遊べます。', 3); }
+function present(event: BattleEvent): void {
+  renderer?.effect(event); notices.push(event);
 }
-function unlockAudio(): void {
-  if (!save.data.sound) return;
-  try { audio ??= new AudioContext(); void audio.resume().catch(() => { soundUnavailable = true; say('音を再生できません。画面の合図で遊べます。', 3); }); }
-  catch { soundUnavailable = true; }
+function flushNotices(active: boolean): void {
+  const priority = { attack: 0, miss: 1, dodge: 2, hit: 3, clash: 4, counter: 5 };
+  const event = notices.sort((a, b) => priority[b.kind] - priority[a.kind])[0]; notices = [];
+  if (!active || !event) return;
+  if (event.kind === 'hit' || event.kind === 'clash') say(event.kind === 'clash' ? '相打ち！' : event.side === 'player' ? 'ヒット！' : '相手の攻撃がヒット');
+  if (event.kind === 'miss') say(event.side === 'player' ? '空振り · 少し中央に戻ろう' : '相手が空振り！');
+  if (event.kind === 'dodge') say(event.side === 'player' ? '回避成功！ 今が反撃の隙' : '相手が回避！', 1.3);
+  if (event.kind === 'counter') say(event.side === 'player' ? '反撃成功！ ダメージUP' : '相手の反撃！', 1.5);
 }
 function transition(next: Screen): void {
   if (screen === 'permission' && next !== 'permission') { permissionToken++; permissionBusy = false; }
   screen = next; input.setEnabled(next === 'battle' || next === 'practice'); input.clear();
+  renderer?.resetEffects(); toast.textContent = ''; notices = []; acceptedAt = null;
   battle.setPaused(!['battle', 'practice'].includes(next));
   draw();
   if (!['battle', 'practice', 'countdown'].includes(next)) {
@@ -96,7 +98,10 @@ function draw(): void {
   if (screen === 'title' && !ready && !fatal) screenElement.querySelector<HTMLButtonElement>('[data-action="play"]')!.disabled = true;
 }
 function settingsFields(): string {
-  return `<label class="setting">音を鳴らす<input type="checkbox" id="sound" ${save.data.sound ? 'checked' : ''}></label><label class="setting slider">操作感度 <output id="sensitivity-value">${save.data.sensitivity.toFixed(1)}</output><input id="sensitivity" type="range" min="0.6" max="1.6" step="0.1" value="${save.data.sensitivity}"></label><p class="minor">高めにすると、小さな振り・傾きに反応します。</p>`;
+  return `<label class="setting">音を鳴らす<input type="checkbox" id="sound" ${save.data.sound ? 'checked' : ''}></label>${([
+    ['attackSensitivity', '攻撃の出やすさ', '高めにすると、小さな振りで攻撃できます。'],
+    ['tiltSensitivity', '回避のしやすさ', '高めにすると、小さな傾きで横に移動できます。'],
+  ] as const).map(([key, label, tip]) => `<label class="setting slider">${label}<output id="${key}-value">${save.data[key].toFixed(1)}</output><input aria-label="${label}" id="${key}" type="range" min="0.6" max="1.6" step="0.1" value="${save.data[key]}" aria-describedby="${key}-tip"></label><p class="minor" id="${key}-tip">${tip}</p>`).join('')}`;
 }
 function scoreRow(name: string, key: keyof Scores): string {
   const score = battle.scores[key], value = rate(score), past = rate(previousBest[key]);
@@ -104,12 +109,13 @@ function scoreRow(name: string, key: keyof Scores): string {
 }
 function metricsText(): string {
   const m = renderer?.metrics();
-  return m ? `平均 ${m.fps.toFixed(1)} fps / p95 ${m.p95FrameMs.toFixed(1)} ms\n33.4ms超 ${m.slowFrames}/${m.frames} frames\n検出→表示 ${m.attackSamples ? `最大 ${m.maxAttackMs.toFixed(1)} ms（${m.attackSamples}回）` : '対象なし（攻撃入力なし）'}\n${m.triangles} triangles / ${m.drawCalls} draws\n${RULE} / 感度 ${save.data.sensitivity.toFixed(1)}\n${navigator.userAgent}\n※この端末での計測。実機センサー試行は別途必要。` : '計測なし';
+  return m ? `平均 ${m.fps.toFixed(1)} fps / p95 ${m.p95FrameMs.toFixed(1)} ms\n33.4ms超 ${m.slowFrames}/${m.frames} frames\n検出→表示 ${m.attackSamples ? `最大 ${m.maxAttackMs.toFixed(1)} ms（${m.attackSamples}回）` : '対象なし（攻撃入力なし）'}\n${m.triangles} triangles / ${m.drawCalls} draws\n${RULE} / 攻撃感度 ${save.data.attackSensitivity.toFixed(1)} / 回避感度 ${save.data.tiltSensitivity.toFixed(1)}\n${navigator.userAgent}\n※この端末での計測。実機センサー試行は別途必要。` : '計測なし';
 }
 function updateHud(): void {
   const p = document.querySelector<HTMLElement>('#player-health'), c = document.querySelector<HTMLElement>('#cpu-health');
   if (!p || !c) return;
   p.style.width = `${battle.player.hp}%`; c.style.width = `${battle.cpu.hp}%`;
+  p.closest('.health')?.classList.toggle('critical', battle.player.hp > 0 && battle.player.hp <= 25);
   document.querySelector('#player-hp')!.textContent = String(Math.ceil(battle.player.hp)); document.querySelector('#cpu-hp')!.textContent = String(Math.ceil(battle.cpu.hp));
   document.querySelector('#timer')!.textContent = screen === 'practice' ? '∞' : String(Math.max(0, Math.ceil(60 - battle.elapsed)));
   const status = document.querySelector<HTMLElement>('#battle-status')!;
@@ -143,7 +149,7 @@ function begin(practice: boolean): void {
   if (practice) transition('practice'); else { countdown = 3; transition('countdown'); }
 }
 async function action(actionName: string): Promise<void> {
-  unlockAudio();
+  audio.unlock();
   if (actionName === 'play' || actionName === 'practice-entry') {
     if (!ready) { if (fatal) location.reload(); return; }
     practiceRequested = actionName === 'practice-entry'; message = ''; transition('permission');
@@ -184,12 +190,15 @@ app.addEventListener('click', e => {
 app.addEventListener('change', e => {
   const element = e.target as HTMLInputElement;
   if (element.id === 'opponent') { save.data.cpu = element.value as BreadId; battle = new Battle(save.data.bread, save.data.cpu); }
-  else if (element.id === 'sound') { save.data.sound = element.checked; soundUnavailable = false; unlockAudio(); }
-  else if (element.id === 'sensitivity') { save.data.sensitivity = Number(element.value); input.sensor.sensitivity = save.data.sensitivity; }
+  else if (element.id === 'sound') { save.data.sound = element.checked; audio.unlock(); }
+  else if (element.id === 'attackSensitivity' || element.id === 'tiltSensitivity') {
+    const value = Number(element.value); if (!Number.isFinite(value) || value < .6 || value > 1.6) return;
+    save.data[element.id] = value; input.sensor[element.id] = value; input.clear();
+  }
   else return;
   save.persist(); showWarning();
 });
-app.addEventListener('input', e => { const element = e.target as HTMLInputElement; if (element.id === 'sensitivity') document.querySelector('#sensitivity-value')!.textContent = Number(element.value).toFixed(1); });
+app.addEventListener('input', e => { const element = e.target as HTMLInputElement; if (element.id === 'attackSensitivity' || element.id === 'tiltSensitivity') document.getElementById(`${element.id}-value`)!.textContent = Number(element.value).toFixed(1); });
 function isLandscape(): boolean { return Math.min(innerWidth, 520) > innerHeight; }
 function environment(): void {
   rotate.hidden = !isLandscape();
@@ -219,12 +228,7 @@ function frame(now: number): void {
     if (attack && !battle.player.attack && battle.player.recoil <= 0) acceptedAt = input.detectedAt;
     battle.advance(dt, input.target(), attack);
     for (const event of battle.drainEvents()) {
-      renderer?.effect(event);
-      if (event.kind === 'hit' || event.kind === 'clash') { beep('hit'); say(event.kind === 'clash' ? '相打ち！' : event.side === 'player' ? 'ヒット！' : '相手の攻撃がヒット'); }
-      if (event.kind === 'miss') say(event.side === 'player' ? '空振り · 少し中央に戻ろう' : '相手が空振り！');
-      if (event.kind === 'dodge') say('回避成功！ 今が反撃の隙', 1.3);
-      if (event.kind === 'counter') { beep('counter'); say('反撃成功！ ダメージUP', 1.5); }
-      if (event.kind === 'attack') beep('attack');
+      present(event);
       if (screen === 'practice') {
         if (practiceStage === 0 && event.kind === 'hit' && event.side === 'player') { practiceStage = 1; battle.practiceStage = 1; say('攻撃できました！ 次は横に回避', 2); }
         else if (practiceStage === 1 && event.kind === 'dodge') { practiceStage = 2; battle.practiceStage = 2; }
@@ -235,6 +239,7 @@ function frame(now: number): void {
     if (battle.paused && ['battle', 'practice'].includes(screen)) pause('更新が中断したので一時停止しました。');
     updateHud();
   }
+  flushNotices(screen === 'battle' || screen === 'practice');
   if (ready && renderer && !document.hidden) {
     try {
       renderer.render(battle, now / 1000, active ? Math.min(dt, .1) : 0, active && !battle.paused);
@@ -244,13 +249,13 @@ function frame(now: number): void {
 }
 draw(); environment(); requestAnimationFrame(frame);
 try {
-  renderer = new TableRenderer(canvas, fail);
+  renderer = new TableRenderer(canvas, fail, audio.play, audio.stop);
   const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 15000));
   void Promise.race([renderer.load(), timeout]).then(() => { ready = true; if (screen === 'title') draw(); }).catch(() => fail('パンの3D素材を読み込めませんでした。通信状態を確認して再試行してください。'));
 } catch { fail('この環境では3D描画（WebGL2）を開始できません。Safariを更新するか、対応端末で開いてください。'); }
 
 // Read-only diagnostics for device QA. Sensor raw values are never persisted or transmitted.
-Object.defineProperty(window, '__panDiagnostics', { value: () => ({ screen, mode: input.mode, ready, elapsed: battle.elapsed, hp: [battle.player.hp, battle.cpu.hp], scores: structuredClone(battle.scores), metrics: renderer?.metrics(), sensorAttacks: input.sensor.attacks, sensitivity: input.sensor.sensitivity }) });
+Object.defineProperty(window, '__panDiagnostics', { value: () => ({ screen, mode: input.mode, ready, elapsed: battle.elapsed, hp: [battle.player.hp, battle.cpu.hp], scores: structuredClone(battle.scores), metrics: renderer?.metrics(), sensorAttacks: input.sensor.attacks, attackSensitivity: input.sensor.attackSensitivity, tiltSensitivity: input.sensor.tiltSensitivity }) });
 if (import.meta.env.DEV && new URLSearchParams(location.search).get('test') === '1') {
   Object.defineProperty(window, '__panTest', { value: { get battle() { return battle; }, get input() { return input; }, get screen() { return screen; }, get save() { return save; }, get renderer() { return renderer; }, action, transition, pause } });
 }

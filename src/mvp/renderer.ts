@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { BREADS, BREAD_IDS, clamp, type BreadId } from './config';
-import { Battle, phase, pose, type BattleEvent, type Fighter, type Side } from './battle';
+import { phase, pose, type BattleView, type BattleEvent, type Fighter, type Side } from './battle';
+import { BattleFeedback, type BattleSound } from './feedback';
 
 interface Model { mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>; positions: Float32Array; normals: Float32Array }
 interface Crumb { mesh: THREE.Mesh; vx: number; vy: number; vz: number; life: number }
+interface Accent { mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>; life: number; duration: number }
 export class TableRenderer {
   private renderer: THREE.WebGLRenderer; private scene = new THREE.Scene();
   private camera = new THREE.PerspectiveCamera(46, 1, .1, 60);
@@ -13,7 +15,14 @@ export class TableRenderer {
   private crumbs: Crumb[] = []; private marker: THREE.Mesh; private shadows: THREE.Mesh[] = [];
   private frames: number[] = []; private latencies: number[] = []; private resize: ResizeObserver;
   private lost = false;
-  constructor(private canvas: HTMLCanvasElement, fail: (message: string) => void) {
+  private feedback = new BattleFeedback();
+  private accents: Accent[] = [];
+  private previous: Partial<Record<Side, { id: number; x: number; z: number }>> = {};
+  private reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  private motionChanged = (): void => { this.clearEffects(); };
+  constructor(private canvas: HTMLCanvasElement, fail: (message: string) => void,
+    private playSound: (sound: BattleSound, delay?: number) => void = () => {}, private stopSound: () => void = () => {}) {
+    this.reducedMotion.addEventListener('change', this.motionChanged);
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -79,7 +88,7 @@ export class TableRenderer {
     this.camera.fov = clamp(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(17.5)) / this.camera.aspect) * 180 / Math.PI, 44, 78);
     this.camera.position.set(.9, 5.8, 7.1); this.camera.lookAt(0, 1.05, -.15); this.camera.updateProjectionMatrix();
   }
-  private choose(battle: Battle): void {
+  private choose(battle: BattleView): void {
     const ids = `${battle.player.bread}/${battle.cpu.bread}`;
     if (this.ids === ids) return;
     for (const side of ['player', 'cpu'] as const) {
@@ -110,6 +119,17 @@ export class TableRenderer {
     const shadow = this.shadows[side === 'player' ? 0 : 1]!; shadow.position.x = p.x; shadow.position.z = p.z;
   }
   effect(event: BattleEvent): void {
+    this.feedback.enqueue(event);
+  }
+  private accent(event: BattleEvent): void {
+    if (this.reducedMotion.matches) return;
+    if (event.kind === 'dodge' || event.kind === 'counter') {
+      const counter = event.kind === 'counter', duration = counter ? .25 : .2;
+      const mesh = new THREE.Mesh(new THREE.RingGeometry(.35, .40, 40, 1, counter ? 0 : .2, counter ? Math.PI * 2 : Math.PI * 1.3),
+        new THREE.MeshBasicMaterial({ color: counter ? '#ffcd69' : '#f1fff1', transparent: true, opacity: .9, side: THREE.DoubleSide, depthWrite: false }));
+      mesh.name = event.kind; mesh.position.set(event.x, 1.45, event.z); mesh.quaternion.copy(this.camera.quaternion);
+      this.scene.add(mesh); this.accents.push({ mesh, life: duration, duration });
+    }
     if (event.kind !== 'hit' && event.kind !== 'clash') return;
     for (let i = 0; i < 12; i++) {
       const mesh = new THREE.Mesh(new THREE.TetrahedronGeometry(.024 + i % 3 * .012), new THREE.MeshBasicMaterial({ color: i % 2 ? '#ebba6b' : '#fff0c9' }));
@@ -117,12 +137,53 @@ export class TableRenderer {
       this.crumbs.push({ mesh, vx: Math.cos(i * 2.4) * 1.3, vy: 1 + i % 4 * .2, vz: Math.sin(i * 2.4), life: .55 });
     }
   }
-  render(battle: Battle, time: number, dt: number, active: boolean): void {
+  private trail(f: Fighter, side: Side): void {
+    const p = pose(f, side), old = this.previous[side], attack = f.attack;
+    if (this.reducedMotion.matches || !attack || phase(f) !== 'active') { delete this.previous[side]; return; }
+    this.previous[side] = { id: attack.id, x: p.x, z: p.z };
+    if (!old || old.id !== attack.id || Math.hypot(p.x - old.x, p.z - old.z) < .005) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+      old.x - .10, 1.42, old.z, old.x + .10, 1.42, old.z, p.x + .10, 1.42, p.z,
+      old.x - .10, 1.42, old.z, p.x + .10, 1.42, p.z, p.x - .10, 1.42, p.z,
+    ], 3));
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: '#fff2cc', transparent: true, opacity: .35, depthWrite: false, side: THREE.DoubleSide }));
+    mesh.name = 'trail'; this.scene.add(mesh); this.accents.push({ mesh, life: .12, duration: .12 });
+  }
+  private clearEffects(): void {
+    for (const effect of [...this.crumbs, ...this.accents]) {
+      this.scene.remove(effect.mesh); effect.mesh.geometry.dispose(); (effect.mesh.material as THREE.Material).dispose();
+    }
+    this.crumbs = []; this.accents = []; this.previous = {}; this.marker.visible = false;
+  }
+  resetEffects(newMatch = false): void { this.clearEffects(); this.feedback.reset(newMatch); this.stopSound(); }
+  render(battle: BattleView, time: number, dt: number, active: boolean): void {
     if (this.lost) return;
+    const feedback = this.feedback.update(battle, active);
+    if (!active) this.resetEffects();
+    else {
+      for (const event of feedback.events) this.accent(event);
+      if (feedback.sound) this.playSound(feedback.sound);
+      if (feedback.alert) this.playSound('danger', .20);
+    }
     this.choose(battle); this.actor(battle.player, 'player', time); this.actor(battle.cpu, 'cpu', time);
     const a = battle.cpu.attack;
     this.marker.visible = active && phase(battle.cpu) === 'windup';
-    if (a) { this.marker.position.set(a.aim, .025, 1.2); this.marker.scale.setScalar(1.2 + .08 * Math.sin(time * 12)); }
+    if (a) {
+      const progress = clamp(a.age / a.windup, 0, 1);
+      this.marker.position.set(a.aim, .025, 1.2);
+      this.marker.scale.setScalar(this.reducedMotion.matches ? 1.4 : 1.65 - .45 * progress);
+      const material = this.marker.material as THREE.MeshBasicMaterial;
+      material.opacity = this.reducedMotion.matches ? .9 : .45 + .5 * progress;
+      material.color.set(progress > .7 ? '#b13d2c' : '#d3543d');
+    }
+    if (active) for (const side of ['player', 'cpu'] as const) this.trail(battle[side], side);
+    for (let i = this.accents.length - 1; i >= 0; i--) {
+      const c = this.accents[i]!; c.life -= dt;
+      c.mesh.material.opacity = (c.mesh.name === 'trail' ? .35 : .9) * Math.max(0, c.life / c.duration);
+      if (c.mesh.name !== 'trail') c.mesh.scale.setScalar(1 + .5 * (1 - c.life / c.duration));
+      if (c.life <= 0) { this.scene.remove(c.mesh); c.mesh.geometry.dispose(); c.mesh.material.dispose(); this.accents.splice(i, 1); }
+    }
     for (let i = this.crumbs.length - 1; i >= 0; i--) {
       const c = this.crumbs[i]!; c.life -= dt; c.vy -= dt * 4;
       c.mesh.position.addScaledVector(new THREE.Vector3(c.vx, c.vy, c.vz), dt);
@@ -132,7 +193,7 @@ export class TableRenderer {
     if (active && dt > 0) { this.frames.push(dt * 1000); if (this.frames.length > 12000) this.frames.shift(); }
   }
   noteLatency(ms: number): void { if (Number.isFinite(ms) && ms >= 0) this.latencies.push(ms); }
-  resetMetrics(): void { this.frames = []; this.latencies = []; }
+  resetMetrics(): void { this.frames = []; this.latencies = []; this.resetEffects(true); }
   projectedBounds(): Record<string, { left: number; right: number; top: number; bottom: number }> {
     const result: Record<string, { left: number; right: number; top: number; bottom: number }> = {};
     for (const [side, actor] of Object.entries(this.actors)) {
@@ -155,5 +216,5 @@ export class TableRenderer {
       maxAttackMs: this.latencies.length ? Math.max(...this.latencies) : 0, attackSamples: this.latencies.length, frames: values.length,
       drawCalls: this.renderer.info.render.calls, triangles: this.renderer.info.render.triangles };
   }
-  dispose(): void { this.resize.disconnect(); this.renderer.dispose(); }
+  dispose(): void { this.resetEffects(true); this.reducedMotion.removeEventListener('change', this.motionChanged); this.resize.disconnect(); this.renderer.dispose(); }
 }

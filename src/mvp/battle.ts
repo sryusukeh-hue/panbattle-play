@@ -11,7 +11,8 @@ export interface Attack {
 }
 export interface Fighter { bread: BreadId; hp: number; x: number; attack: Attack | null; recoil: number; hit: number }
 export interface Pose { x: number; y: number; z: number; lean: number; rx: number; rz: number; progress: number }
-export interface BattleEvent { kind: 'hit' | 'clash' | 'miss' | 'dodge' | 'counter' | 'attack'; side: Side; x: number; z: number }
+export interface BattleView { player: Fighter; cpu: Fighter }
+export interface BattleEvent { id: number; kind: 'hit' | 'clash' | 'miss' | 'dodge' | 'counter' | 'attack'; side: Side; x: number; z: number }
 export const emptyScores = (): Scores => ({ dodge: { success: 0, opportunities: 0 }, counter: { success: 0, opportunities: 0 } });
 export function phase(f: Fighter): 'ready' | 'windup' | 'active' | 'recovery' {
   const a = f.attack;
@@ -43,7 +44,7 @@ export class Battle {
   scores = emptyScores(); events: BattleEvent[] = [];
   counterUntil = 0; counterAvailable = false; cpuEnabled = true;
   practice: boolean; practiceStage = 0;
-  private accumulator = 0; private serial = 0; private seed: number;
+  private accumulator = 0; private serial = 0; private eventSerial = 0; private seed: number;
   private nextCpu = 1.5; private nextMove = 3.2; private cpuTarget = 0;
   constructor(player: BreadId, cpu: BreadId, options: { practice?: boolean; seed?: number } = {}) {
     this.player = this.make(player); this.cpu = this.make(cpu);
@@ -59,7 +60,7 @@ export class Battle {
     f.attack = { age: 0, windup: BREADS[f.bread].windup + (side === 'cpu' ? .65 : 0), recovery: BREADS[f.bread].recovery + (side === 'cpu' ? .55 : 0), spent: false, aim, origin: other.x,
       threatened: side === 'cpu' && Math.abs(aim - other.x) < BREADS[f.bread].width + BREADS[other.bread].width,
       resolved: false, id: ++this.serial };
-    this.events.push({ kind: 'attack', side, x: f.x, z: side === 'player' ? 1.2 : -1.2 });
+    this.events.push({ id: ++this.eventSerial, kind: 'attack', side, x: f.x, z: side === 'player' ? 1.2 : -1.2 });
     return true;
   }
   advance(dt: number, target: number, attack = false): void {
@@ -107,7 +108,7 @@ export class Battle {
         this.cpu.hit = .3;
         if (counter) {
           this.scores.counter.success++; this.counterAvailable = false;
-          this.events.push({ kind: 'counter', side: 'player', x: cp.x, z: cp.z });
+          this.events.push({ id: ++this.eventSerial, kind: 'counter', side: 'player', x: cp.x, z: cp.z });
         }
       }
       if (cHit && ca) {
@@ -118,7 +119,7 @@ export class Battle {
         if (!this.practice) this.player.hp = Math.max(0, this.player.hp - BREADS[this.cpu.bread].damage);
         this.player.hit = .3;
       }
-      this.events.push({ kind: pHit && cHit ? 'clash' : 'hit', side: pHit ? 'player' : 'cpu', x: (pp.x + cp.x) / 2, z: (pp.z + cp.z) / 2 });
+      this.events.push({ id: ++this.eventSerial, kind: pHit && cHit ? 'clash' : 'hit', side: pHit ? 'player' : 'cpu', x: (pp.x + cp.x) / 2, z: (pp.z + cp.z) / 2 });
       this.player.recoil = .38; this.cpu.recoil = .38;
     }
     for (const side of ['player', 'cpu'] as const) {
@@ -126,13 +127,13 @@ export class Battle {
       if (!a) continue;
       if (a.age >= a.windup + b.active && !a.resolved) {
         a.resolved = true;
-        if (!a.spent) this.events.push({ kind: 'miss', side, x: f.x, z: 0 });
+        if (!a.spent) this.events.push({ id: ++this.eventSerial, kind: 'miss', side, x: f.x, z: 0 });
         if (side === 'cpu' && a.threatened) {
           this.scores.dodge.opportunities++;
           if (!a.spent && Math.abs(this.player.x - a.origin) >= .25) {
             this.scores.dodge.success++; this.scores.counter.opportunities++;
             this.counterUntil = this.elapsed + a.recovery; this.counterAvailable = true;
-            this.events.push({ kind: 'dodge', side: 'player', x: this.player.x, z: 1.2 });
+            this.events.push({ id: ++this.eventSerial, kind: 'dodge', side: 'player', x: this.player.x, z: 1.2 });
           }
         }
       }

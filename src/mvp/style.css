@@ -3,3 +3,10 @@
 @media(max-width:374px){.menu{padding-left:14px;padding-right:14px}.sheet{padding:21px 17px}h1{font-size:25px}.title-top h1{font-size:52px}.health span{font-size:9px}.bread-card{padding:10px}}
 @media(max-height:720px){.title-top h1{font-size:45px}.title-top p{font-size:12px;margin-top:12px}.title-top{padding-top:0}.menu{align-items:flex-start;padding-top:calc(env(safe-area-inset-top) + 16px)}.sheet{padding:19px 17px}.sheet h1{margin-bottom:9px}.selection .bread-list{margin:12px 0}.bread-card{padding:9px}.play-tip{bottom:calc(env(safe-area-inset-bottom) + 91px);padding:6px}.title-screen{padding-top:25px}.title-bottom{bottom:calc(env(safe-area-inset-bottom) + 16px)}}
 @media(prefers-reduced-motion:reduce){button,.health-track i{transition:none}}
+
+#app[data-screen="pause"] .menu, #app[data-screen="settings"] .menu { align-items: flex-start; }
+#app[data-screen="pause"] .sheet, #app[data-screen="settings"] .sheet { margin-block: auto; }
+.health.critical { border-radius: 8px; background: #fff0d8; outline: 2px solid #b76a46; animation: low-health 1s ease-in-out infinite; }
+.health.critical .health-track i { background: #a74732; }
+@keyframes low-health { 50% { box-shadow: 0 0 0 4px #b76a4625; } }
+@media(prefers-reduced-motion:reduce) { .health.critical { animation: none; } }

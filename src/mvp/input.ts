@@ -33,7 +33,10 @@ export class GameInput {
   }
   private keys(): void { this.left = this.held.has('ArrowLeft') || this.held.has('KeyA'); this.right = this.held.has('ArrowRight') || this.held.has('KeyD'); }
   private trigger(): void { if (!this.enabled) return; this.pending = true; this.detectedAt = performance.now(); }
-  consume(): boolean { const value = this.pending; this.pending = false; return value; }
+  consume(): boolean {
+    if (this.sensor.poll(performance.now(), this.enabled && this.mode === 'sensor')) this.trigger();
+    const value = this.pending; this.pending = false; return value;
+  }
   target(): number {
     if (this.mode === 'sensor') return this.sensor.tilt;
     if (this.mode === 'keyboard') return ((this.right ? 1 : 0) - (this.left ? 1 : 0)) * LIMIT;
@@ -50,12 +53,12 @@ export class GameInput {
     if (!this.attached) {
       window.addEventListener('devicemotion', e => {
         const a = e.acceleration, now = performance.now();
-        if (this.sensor.motion({ time: now, x: a?.x ?? null, y: a?.y ?? null, z: a?.z ?? null }, this.enabled && this.mode === 'sensor')) this.trigger();
         const g = e.accelerationIncludingGravity;
         if (finite(g?.x) && finite(g?.y) && finite(a?.x) && finite(a?.y)) {
           const roll = gravityRoll(g.x - a.x, g.y - a.y);
           if (roll !== null) { this.sensor.orientation(roll, now); this.lastGravityAt = now; }
         }
+        this.sensor.motion({ time: now, x: a?.x ?? null, y: a?.y ?? null, z: a?.z ?? null }, this.enabled && this.mode === 'sensor');
       });
       window.addEventListener('deviceorientation', e => {
         const now = performance.now();
