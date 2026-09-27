@@ -17,6 +17,11 @@ async function advanceUntil(page: Page, ready: () => Promise<boolean>): Promise<
   }
   expect(await ready(), 'condition within 5 seconds of browser time').toBe(true);
 }
+// The finish and replay screens redraw the skip button and advance on their own; on a slow runner either path may win.
+async function skipToResult(page: Page): Promise<void> {
+  const skip = page.getByRole('button', { name: 'リプレイをスキップ →' });
+  await expect.poll(async () => { if (await skip.isVisible()) await skip.click({ timeout: 2000 }).catch(() => {}); return page.locator('#app').getAttribute('data-screen'); }, { timeout: 60000 }).toBe('result');
+}
 async function select(page: Page, mode = 'タッチ操作'): Promise<void> {
   await page.getByRole('button', { name: '食卓で勝負する →' }).click();
   await page.getByText('補助操作で遊ぶ', { exact: true }).click(); await page.getByRole('button', { name: mode, exact: true }).click();
@@ -39,7 +44,7 @@ test('first run, keyboard combat, pause/resume, result, rematch and legacy save'
   await page.waitForTimeout(400); expect((await page.evaluate(() => window.__panDiagnostics())).elapsed).toBe(frozen.elapsed);
   await page.getByRole('button', { name: '再開する →' }).click();
   await page.evaluate(() => { window.__panTest.battle.elapsed = 59.99; });
-  await page.getByRole('button', { name: 'リプレイをスキップ →' }).click();
+  await skipToResult(page);
   await expect(page.getByRole('heading', { name: 'こんがり、勝利！' })).toBeVisible();
   await expect(page.getByText('機会なし', { exact: true })).toHaveCount(2);
   expect(await page.evaluate(() => localStorage.getItem('panbattle.save'))).toBe('{"keep":"legacy"}');
@@ -105,9 +110,7 @@ test('storage failure is visible, settings and result still work', async ({ page
   await expect(page.locator('#save-warning')).toContainText('端末に保存できません');
   await page.getByRole('button', { name: '戻る', exact: true }).click(); await select(page); await fight(page);
   await page.evaluate(() => { window.__panTest.battle.elapsed = 59.99; });
-  // The finish and replay screens redraw the skip button and advance on their own; on a slow runner either path may win.
-  const skip = page.getByRole('button', { name: 'リプレイをスキップ →' });
-  await expect.poll(async () => { if (await skip.isVisible()) await skip.click({ timeout: 2000 }).catch(() => {}); return page.locator('#app').getAttribute('data-screen'); }, { timeout: 60000 }).toBe('result');
+  await skipToResult(page);
   await expect(page.getByRole('button', { name: '同じパンで、もう一戦 →' })).toBeVisible();
 });
 for (const width of [360, 390, 430]) test(`three breads and all opponent combinations render without errors at ${width}px`, async ({ page }, testInfo) => {
@@ -260,8 +263,7 @@ test('three rematches compare past records, persist after reload and never save 
       b.scores.dodge = { success: i + 1, opportunities: 3 }; b.scores.counter = { success: i, opportunities: 2 };
       b.elapsed = 59.99;
     }, i);
-    await page.getByRole('button', { name: 'リプレイをスキップ →' }).click();
-    await expect(page.locator('#app')).toHaveAttribute('data-screen', 'result');
+    await skipToResult(page);
     if (i === 0) await expect(page.getByText('記録なし', { exact: true })).toHaveCount(2);
     else await expect(page.getByText('自己ベスト更新', { exact: true })).toHaveCount(2);
     if (i === 0) { await page.getByText('この試合の動作計測', { exact: true }).click(); await expect(page.locator('.diagnostics pre')).toContainText('対象なし（攻撃入力なし）'); }
