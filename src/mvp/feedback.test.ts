@@ -3,6 +3,7 @@ import { Battle, pose, type BattleEvent } from './battle';
 import { BattleFeedback, ReplayBuffer, damageStage, deformVertex, VISUAL_LIMITS } from './feedback';
 
 const event = (kind: BattleEvent['kind'], id: number): BattleEvent => ({ id, kind, side: 'player', x: 0, z: 0 });
+const special = (kind: BattleEvent['kind'], id: number, side: BattleEvent['side'], extra: Pick<BattleEvent, 'stage' | 'special'> = {}): BattleEvent => ({ ...event(kind, id), side, ...extra });
 describe('shared combat feedback', () => {
   it('emits a low-priority heartbeat once per final second only when local time is supplied', () => {
     const f = new BattleFeedback(), battle = new Battle('shokupan', 'shokupan');
@@ -64,6 +65,54 @@ describe('shared combat feedback', () => {
     f.enqueue(event('hit', 1)); const result = f.update(battle, true);
     expect(result.sound).toBe('hit'); expect(result.alert).toBe(true);
     expect(f.update(battle, true).alert).toBe(false);
+  });
+});
+
+describe('special move feedback', () => {
+  it('ranks special sounds: final landing > activation > counter > clash > hit > middle stage > dodge', () => {
+    const battle = new Battle('croissant', 'shokupan'), sources: [string, (id: number) => BattleEvent][] = [
+      ['special-final', id => special('special-hit', id, 'player', { stage: 2 })], ['special', id => special('special', id, 'cpu')],
+      ['counter', id => event('counter', id)], ['clash', id => event('clash', id)], ['hit', id => event('hit', id)],
+      ['special-hit', id => special('special-hit', id, 'player', { stage: 0 })], ['dodge', id => event('dodge', id)]];
+    for (let i = 0; i < sources.length; i++) {
+      const f = new BattleFeedback(); sources.slice(i).forEach(([, make], id) => f.enqueue(make(id)));
+      expect(f.update(battle, true).sound).toBe(sources[i]![0]);
+    }
+  });
+  it('voices middle croissant stages lightly and the last stage (or a one-hit special) as the finisher, naming the attacker', () => {
+    const f = new BattleFeedback(), battle = new Battle('croissant', 'shokupan');
+    for (const [stage, sound] of [[0, 'special-hit'], [1, 'special-hit'], [2, 'special-final']] as const) {
+      f.enqueue(special('special-hit', 10 + stage, 'player', { stage }));
+      expect(f.update(battle, true)).toMatchObject({ sound, soundSide: 'player' });
+    }
+    f.enqueue(special('special-hit', 20, 'cpu', { stage: 0 })); expect(f.update(battle, true)).toMatchObject({ sound: 'special-final', soundSide: 'cpu' });
+    f.enqueue(special('special', 21, 'cpu')); expect(f.update(battle, true)).toMatchObject({ sound: 'special', soundSide: 'cpu' });
+  });
+  it('whooshes only for a missed special, below a dodge by the defender', () => {
+    const f = new BattleFeedback(), battle = new Battle('francepan', 'croissant');
+    f.enqueue(special('miss', 1, 'cpu')); expect(f.update(battle, true).sound).toBeNull();
+    f.enqueue(special('miss', 2, 'cpu', { special: true })); expect(f.update(battle, true)).toMatchObject({ sound: 'special-miss', soundSide: 'cpu' });
+    f.enqueue(special('miss', 3, 'cpu', { special: true })); f.enqueue(special('dodge', 4, 'player', { special: true }));
+    expect(f.update(battle, true)).toMatchObject({ sound: 'dodge', soundSide: 'player' });
+  });
+  it('chimes once when the player meter fills, again after a rematch, never for the CPU, the first frame or online views', () => {
+    const f = new BattleFeedback(), battle = new Battle('shokupan', 'shokupan');
+    battle.player.meter = 100; expect(f.update(battle, true).sound).toBeNull();
+    battle.player.meter = 75; expect(f.update(battle, true).sound).toBeNull();
+    battle.cpu.meter = 100; expect(f.update(battle, true).sound).toBeNull();
+    battle.player.meter = 100; expect(f.update(battle, true)).toMatchObject({ sound: 'charged', soundSide: 'player' });
+    expect(f.update(battle, true).sound).toBeNull(); expect(f.update(battle, true).sound).toBeNull();
+    f.reset(true); expect(f.update(battle, true).sound).toBeNull();
+    battle.player.meter = 50; f.update(battle, true); battle.player.meter = 100; expect(f.update(battle, true).sound).toBe('charged');
+    const online = new BattleFeedback(); delete battle.player.meter; online.update(battle, true);
+    expect(online.update(battle, true).sound).toBeNull(); battle.player.meter = 100; expect(online.update(battle, true).sound).toBeNull();
+  });
+  it('holds the chime behind the hit that filled the meter, and drops it once the meter is spent', () => {
+    const f = new BattleFeedback(), battle = new Battle('shokupan', 'shokupan'); battle.player.meter = 80; f.update(battle, true);
+    battle.player.meter = 100; f.enqueue(event('hit', 1)); expect(f.update(battle, true).sound).toBe('hit');
+    expect(f.update(battle, true).sound).toBe('charged'); expect(f.update(battle, true).sound).toBeNull();
+    battle.player.meter = 90; f.update(battle, true); battle.player.meter = 100; f.enqueue(event('counter', 2)); expect(f.update(battle, true).sound).toBe('counter');
+    battle.player.meter = 0; expect(f.update(battle, true).sound).toBeNull();
   });
 });
 

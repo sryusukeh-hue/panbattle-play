@@ -1,7 +1,9 @@
 import './style.css';
-import { BREADS, BREAD_IDS, RULE, type BreadId, type Mode } from './config';
-import { Battle, DIFFICULTIES, DIFFICULTY, phase, type Difficulty, type Scores, type BattleEvent, type Side } from './battle';
-import { emptyStats, matchScore, nextTip, rankOf, recordStat, type Rank, type Tip } from './stats';
+import { BREADS, BREAD_IDS, type BreadId, type Mode } from './config';
+import { SPECIAL_RULE } from '../shared/rules';
+import { SPECIALS, METER_MAX, CUTIN_SECONDS } from '../shared/specials';
+import { Battle, DIFFICULTIES, DIFFICULTY, PRACTICE_SPECIAL_STAGE, movable, phase, type Difficulty, type Scores, type BattleEvent, type Side } from './battle';
+import { emptyStats, matchScore, nextTip, rankOf, recordCharged, recordStat, type Rank, type Tip } from './stats';
 import { GameInput } from './input';
 import { SaveStore, rate } from './save';
 import { TableRenderer, type StanceCue } from './renderer';
@@ -10,7 +12,7 @@ import { resultImage, shareResult } from './share';
 
 type Screen = 'title' | 'permission' | 'calibrate' | 'select' | 'practice-intro' | 'practice' | 'practice-done' | 'countdown' | 'battle' | 'replay' | 'pause' | 'settings' | 'result' | 'error' | 'finish';
 const app = document.querySelector<HTMLElement>('#app')!;
-app.innerHTML = `<div class="game-shell"><canvas id="table" aria-label="食卓で向かい合うパンの3D対戦画面"></canvas><div class="vignette"></div><div id="popups" aria-hidden="true"></div><div id="hud" hidden></div><div id="screen"></div><div id="banner" aria-hidden="true"></div><div id="toast" role="status" aria-live="polite"></div><div id="controls" hidden><button data-control="left" aria-label="左へ移動">←</button><button data-control="attack">攻撃<span>軽くタップ</span></button><button data-control="right" aria-label="右へ移動">→</button></div><div id="save-warning" role="status"></div><div id="rotate" hidden><span>↻</span><h2>縦に持ってね</h2><p>対戦は止まっています。<br>縦に戻して「再開」を選んでください。</p></div></div>`;
+app.innerHTML = `<div class="game-shell"><canvas id="table" aria-label="食卓で向かい合うパンの3D対戦画面"></canvas><div class="vignette"></div><div id="popups" aria-hidden="true"></div><div id="hud" hidden></div><div id="screen"></div><div id="banner" aria-hidden="true"></div><div id="cutin" aria-hidden="true"></div><div id="toast" role="status" aria-live="polite"></div><div id="controls" hidden><button data-control="left" aria-label="左へ移動">←</button><button data-control="attack">攻撃<span>軽くタップ</span></button><button data-control="right" aria-label="右へ移動">→</button></div><button id="special" type="button" hidden><span class="special-fill"></span><span class="special-text">ひっさつ</span></button><div id="save-warning" role="status"></div><div id="rotate" hidden><span>↻</span><h2>縦に持ってね</h2><p>対戦は止まっています。<br>縦に戻して「再開」を選んでください。</p></div></div>`;
 const canvas = document.querySelector<HTMLCanvasElement>('#table')!;
 const screenElement = document.querySelector<HTMLElement>('#screen')!;
 const hud = document.querySelector<HTMLElement>('#hud')!;
@@ -19,6 +21,7 @@ const toast = document.querySelector<HTMLElement>('#toast')!;
 const warning = document.querySelector<HTMLElement>('#save-warning')!;
 const rotate = document.querySelector<HTMLElement>('#rotate')!;
 const popups = document.querySelector<HTMLElement>('#popups')!, bannerElement = document.querySelector<HTMLElement>('#banner')!;
+const cutinElement = document.querySelector<HTMLElement>('#cutin')!, specialButton = document.querySelector<HTMLButtonElement>('#special')!;
 const save = new SaveStore();
 let screen: Screen = 'title', returnScreen: Screen = 'title', resumeScreen: Screen = 'battle';
 let battle = new Battle(save.data.bread, save.data.cpu);
@@ -29,7 +32,15 @@ let practiceStage = 0; let acceptedAt: number | null = null;
 let stats = emptyStats(); let finishLeft = 0; let lastCount = 0; let thumbs: Partial<Record<BreadId, string>> = {};
 let result: { score: number; rank: Rank; previous: number | null; tip: Tip } | null = null; let lastReject = 0;
 // A drill trains one skill and ends on it; pendingBegin resumes a match or drill after a forced recalibration.
-let drill: 0 | 1 | 2 = 0; let pendingBegin: { practice: boolean; stage: number; drill: 0 | 1 | 2 } | null = null;
+let drill: 0 | 1 | 2 | 3 = 0; let pendingBegin: { practice: boolean; stage: number; drill: 0 | 1 | 2 | 3 } | null = null;
+// Special meter presentation: last seen meter per side (for +gain popups and the MAX moment) and the practice goal.
+let meterSeen: Record<Side, number> = { player: 0, cpu: 0 }; let specialLanded = false; let cpuCharged = false;
+// Attack id whose landed-stage count ("nHIT!") was already shown, per side.
+let hitsShown: Record<Side, number> = { player: -1, cpu: -1 };
+// The CPU charge flag from the previous frame, so the frame that completes the charge shows no number either.
+let chargingSeen = false;
+// In the drill's dodge step a full meter is not usable yet, so it must not look ready.
+const drillDodge = (): boolean => battle.practice && practiceStage === PRACTICE_SPECIAL_STAGE && battle.specialStep === 'dodge'; let cutinTimer: ReturnType<typeof setTimeout> | undefined;
 let shareFile: File | null = null; let sharePreparing = false; let shareFailed = false; let shareGeneration = 0; let sharing = false;
 const audio = new BattleAudio(() => save.data.sound, () => say('音を再生できません。画面の合図で遊べます。', 3), () => save.data.music ?? true);
 const level = (): Difficulty => save.data.difficulty ?? 'gentle';
@@ -41,6 +52,7 @@ let stallPause = true; // DEV test hook can disable it for screenshots taken by 
 const input = new GameInput(controls, () => { if (['battle', 'practice', 'countdown', 'replay'].includes(screen)) pause('一時停止'); });
 input.sensor.attackSensitivity = save.data.attackSensitivity;
 input.sensor.tiltSensitivity = save.data.tiltSensitivity;
+input.bindSpecial(specialButton);
 const modes: Record<Mode, string> = { sensor: '振る・傾ける', touch: 'タッチ', keyboard: 'キーボード' };
 const emoji: Record<BreadId, string> = { shokupan: '🍞', francepan: '🥖', croissant: '🥐' };
 const button = (action: string, label: string, secondary = false): string => `<button data-action="${action}" class="${secondary ? 'secondary' : 'primary'}">${label}</button>`;
@@ -49,14 +61,58 @@ function say(text: string, seconds = 1.2): void { toast.textContent = text; toas
 function restart(element: HTMLElement, className: string): void { element.classList.remove(className); void element.offsetWidth; element.classList.add(className); }
 function banner(text: string, kind: string): void { bannerElement.textContent = text; bannerElement.className = ''; void bannerElement.offsetWidth; bannerElement.className = `show ${kind}`; }
 // Floating damage numbers above the bread that took the hit (presentation only).
-function popup(side: Side, text: string, kind: 'deal' | 'hurt' | 'counter'): void {
+function popup(side: Side, text: string, kind: 'deal' | 'hurt' | 'counter' | 'special' | 'combo' | 'sfx', lift?: number): void {
   if (!renderer) return;
-  const point = renderer.project(battle, side), element = document.createElement('span');
+  const point = renderer.project(battle, side, lift), element = document.createElement('span');
   element.className = `popup ${kind}`; element.textContent = text;
   element.style.left = `${point.x + (Math.random() - .5) * 24}px`; element.style.top = `${point.y}px`;
   while (popups.childElementCount >= 6) popups.firstElementChild!.remove();
   popups.append(element); setTimeout(() => element.remove(), 1100);
 }
+const drillName = (d: number): string => d === 1 ? '回避' : d === 2 ? '反撃' : 'ひっさつ';
+// Cut-in for a special move ('both' = two bands for a simultaneous start). seek (seconds already played) resumes it
+// after a pause without restarting. When it ends, the move name stays briefly as a small tag.
+function showCutin(who: Side | 'both', seek = 0): void {
+  const sides: Side[] = who === 'both' ? ['player', 'cpu'] : [who], left = Math.max(0, CUTIN_SECONDS - seek);
+  const band = (side: Side): string => {
+    const bread = battle[side].bread, spec = SPECIALS[bread];
+    return `<div class="cutin-band ${side}"><div class="cutin-portrait">${thumbs[bread] ? `<img src="${thumbs[bread]}" alt="">` : emoji[bread]}</div><div class="cutin-text"><small>${side === 'player' ? 'YOU' : 'CPU'} · ひっさつ！</small><strong><b>${spec.kicker}</b>${spec.title}</strong><span>${spec.ruby}</span>${side === 'cpu' ? '<em>横へ回避！</em>' : ''}</div></div>`;
+  };
+  cutinElement.className = `show ${who}`; cutinElement.style.setProperty('--seek', `${-seek}s`);
+  cutinElement.innerHTML = `<div class="cutin-dim"></div><div class="cutin-lines"></div>${sides.map(band).join('')}`;
+  clearTimeout(cutinTimer);
+  cutinTimer = setTimeout(() => {
+    cutinElement.className = 'tail'; cutinElement.innerHTML = sides.map(side => `<div class="cutin-tail ${side}">${SPECIALS[battle[side].bread].shout}</div>`).join('');
+    cutinTimer = setTimeout(hideCutin, 900);
+  }, left * 1000);
+}
+function hideCutin(): void { clearTimeout(cutinTimer); cutinElement.className = ''; cutinElement.replaceChildren(); }
+function meterGain(side: Side, amount: number): void {
+  const element = document.querySelector<HTMLElement>(`#${side}-meter`)?.closest<HTMLElement>('.health');
+  if (!element) return;
+  const gain = document.createElement('span'); gain.className = 'meter-gain'; gain.textContent = `+${Math.round(amount)}`;
+  element.append(gain); setTimeout(() => gain.remove(), 700);
+}
+// Tracks meter changes each frame: +gain popups, the one-time MAX moment (announced once) and match stats.
+function watchMeters(): void {
+  for (const side of ['player', 'cpu'] as const) {
+    const meter = battle[side].meter ?? 0, before = meterSeen[side]; meterSeen[side] = meter;
+    if (meter <= before) continue;
+    // Numbers only for discrete gains (hit/dodge/clash); drill refills and the CPU charge just grow the bar.
+    if (meter - before >= 5 && !(battle.practice && practiceStage === PRACTICE_SPECIAL_STAGE) && !(side === 'cpu' && (battle.cpuCharging || chargingSeen))) meterGain(side, meter - before);
+    if (meter < METER_MAX) continue;
+    if (!battle.practice) recordCharged(stats, side);
+    if (side === 'player' && !drillDodge()) { banner('ひっさつ OK!', 'charged'); say(input.mode === 'keyboard' ? 'ゲージMAX！ Xキーで ひっさつ！' : 'ゲージMAX！ 「ひっさつ」をタップ！', 1.6); }
+  }
+}
+function specialReason(): string {
+  if (battle.practice && practiceStage === PRACTICE_SPECIAL_STAGE && battle.specialStep === 'dodge') return 'まずはCPUのひっさつを見切ろう';
+  if ((battle.player.meter ?? 0) < METER_MAX) return 'ゲージがたりない · 当てる・避けるで たまる';
+  return '振り終わってから ひっさつ！';
+}
+// A single-hit special's only stage, or a multi-hit special's last one.
+const finalStage = (event: BattleEvent): boolean => (event.stage ?? 0) === SPECIALS[battle[event.side].bread].stages.length - 1;
+function landedStages(side: Side): number { let mask = battle[side].attack?.special?.mask ?? 0, count = 0; while (mask) { count += mask & 1; mask >>= 1; } return count; }
 function hurt(side: Side): void {
   const element = document.querySelector<HTMLElement>(`#${side === 'player' ? 'player' : 'cpu'}-health`)?.closest<HTMLElement>('.health');
   if (element) restart(element, 'hurt');
@@ -69,13 +125,19 @@ function enterResult(): void {
 function present(event: BattleEvent): void {
   renderer?.effect(event); notices.push(event);
 }
+// A drill step change must not be covered by that frame's ordinary combat notice.
+let stepNotice: [string, number] | null = null;
 function flushNotices(active: boolean): void {
-  const priority = { attack: 0, miss: 1, dodge: 2, hit: 3, clash: 4, counter: 5 };
+  const priority = { attack: 0, miss: 1, dodge: 2, hit: 3, clash: 4, counter: 5, special: 6, 'special-hit': 7 };
   const event = notices.sort((a, b) => priority[b.kind] - priority[a.kind])[0]; notices = [];
+  if (active && stepNotice) { say(...stepNotice); stepNotice = null; return; }
+  stepNotice = null;
   if (!active || !event) return;
   if (event.kind === 'hit' || event.kind === 'clash') say(event.kind === 'clash' ? '相打ち！' : event.side === 'player' ? 'ヒット！' : '相手の攻撃がヒット');
-  if (event.kind === 'miss') say(event.side === 'player' ? '空振り · 少し中央に戻ろう' : '相手が空振り！');
-  if (event.kind === 'dodge') say(event.side === 'player' ? '回避成功！ 今が反撃の隙' : '相手が回避！', 1.3);
+  if (event.kind === 'miss') say(event.special ? event.side === 'player' ? 'かわされた！ 戻るまで気をつけて' : 'ひっさつをかわした！' : event.side === 'player' ? '空振り · 少し中央に戻ろう' : '相手が空振り！');
+  if (event.kind === 'dodge') say(event.special ? event.side === 'player' ? 'ひっさつ回避！ 今が反撃のチャンス！' : '相手がひっさつを回避！' : event.side === 'player' ? '回避成功！ 今が反撃の隙' : '相手が回避！', 1.3);
+  if (event.kind === 'special') say(event.side === 'player' ? SPECIALS[battle.player.bread].shout : 'CPUのひっさつ！ 横へ回避！', 1.2);
+  if (event.kind === 'special-hit' && finalStage(event)) say(event.side === 'player' ? 'ひっさつ命中！' : 'ひっさつを受けた…', 1.2);
   if (event.kind === 'counter') say(event.side === 'player' ? '反撃成功！ ダメージUP' : '相手の反撃！', 1.5);
 }
 function transition(next: Screen): void {
@@ -86,8 +148,11 @@ function transition(next: Screen): void {
   toast.textContent = ''; notices = []; acceptedAt = null;
   if (!['battle', 'practice', 'finish'].includes(next)) popups.replaceChildren();
   if (next !== 'battle') bannerElement.className = '';
+  if (!['battle', 'practice'].includes(next)) hideCutin();
   battle.setPaused(!['battle', 'practice'].includes(next));
   draw();
+  // Resuming mid cut-in continues the same overlay from where it stopped.
+  if (['battle', 'practice'].includes(next) && battle.cutin) { showCutin(battle.cutin.side, CUTIN_SECONDS - battle.cutin.left); audio.duck(battle.cutin.left + .2); }
   if (!['battle', 'practice', 'countdown'].includes(next)) {
     const focus = screenElement.querySelector<HTMLElement>('h1,h2'); if (focus) { focus.tabIndex = -1; focus.focus({ preventScroll: true }); }
   } else (document.activeElement as HTMLElement | null)?.blur();
@@ -95,6 +160,7 @@ function transition(next: Screen): void {
 function showWarning(): void { warning.textContent = save.warning; warning.hidden = !save.warning; }
 function draw(): void {
   showWarning();
+  app.dataset.mode = input.mode; specialButton.hidden = !['battle', 'practice'].includes(screen);
   if (screen === 'replay') {
     app.dataset.screen = screen; hud.hidden = controls.hidden = true; screenElement.className = 'play-overlay';
     screenElement.innerHTML = `<div class="replay-label"><small>${battle.player.hp <= 0 || battle.cpu.hp <= 0 ? 'K.O.' : 'TIME UP'}</small><h2>ラストプレー</h2><p>決着の瞬間をスローで</p></div><div class="replay-controls">${button('replay-skip', 'リプレイをスキップ →')}</div>`; return;
@@ -110,7 +176,7 @@ function draw(): void {
   hud.hidden = !playing; controls.hidden = !['battle', 'practice'].includes(screen) || input.mode !== 'touch';
   screenElement.className = playing ? 'play-overlay' : `menu ${screen === 'title' ? 'title-screen' : ''}`;
   if (playing) {
-    hud.innerHTML = `<div class="topline"><span class="match-label">${screen === 'practice' ? 'ダメージなしの練習' : '食卓 / CPU戦'}</span><button data-action="pause" aria-label="一時停止">Ⅱ</button></div><div class="health-row"><div class="health"><span>YOU · ${BREADS[battle.player.bread].name}</span><div class="health-track"><s id="player-ghost"></s><i id="player-health"></i></div><b id="player-hp">100</b></div><div class="timer" id="timer">60</div><div class="health enemy"><span>CPU · ${BREADS[battle.cpu.bread].name}</span><div class="health-track"><s id="cpu-ghost"></s><i id="cpu-health"></i></div><b id="cpu-hp">100</b></div></div><div class="status-line" id="battle-status"></div>`;
+    hud.innerHTML = `<div class="topline"><span class="match-label">${screen === 'practice' ? 'ダメージなしの練習' : '食卓 / CPU戦'}</span><button data-action="pause" aria-label="一時停止">Ⅱ</button></div><div class="health-row"><div class="health"><span>YOU · ${BREADS[battle.player.bread].name}</span><div class="health-track"><s id="player-ghost"></s><i id="player-health"></i></div><div class="meter" id="player-meter" role="img" aria-label="ひっさつゲージ"><i></i></div><b><span id="player-hp">100</span><em class="meter-tag" id="player-meter-tag"></em></b></div><div class="timer" id="timer">60</div><div class="health enemy"><span>CPU · ${BREADS[battle.cpu.bread].name}</span><div class="health-track"><s id="cpu-ghost"></s><i id="cpu-health"></i></div><div class="meter" id="cpu-meter" role="img" aria-label="CPUのひっさつゲージ"><i></i></div><b><em class="meter-tag" id="cpu-meter-tag"></em><span id="cpu-hp">100</span></b></div></div><div class="status-line" id="battle-status"></div>`;
     if (screen === 'countdown') lastCount = 0; // redraw restarts the number from the markup
     if (screen === 'countdown') screenElement.innerHTML = `<div class="countdown"><span>構えて、相手を見よう</span><strong id="count">3</strong><em>${DIFFICULTY[battle.difficulty].label}CPU · ${BREADS[battle.cpu.bread].name}</em></div>`;
     else screenElement.innerHTML = `<div class="play-tip" id="play-tip"></div>`;
@@ -124,11 +190,11 @@ function draw(): void {
   } else if (screen === 'calibrate') {
     html = `<section class="sheet">${header('02 / READY', 'いつもの持ち方で', input.mode === 'sensor' ? 'iPhoneを縦に構え、楽な角度で止めてください。<br>この位置を左右移動の中央にします。' : input.mode === 'keyboard' ? '← → または A Dで横移動。<br>Space / Zで攻撃。Escapeで一時停止。' : '左・右ボタンを押している間、横に移動。<br>中央の攻撃ボタンは、1タップで1回。')}<div class="calibration-icon">↔</div><p id="sensor-status" class="status-box"></p>${button('calibrated', 'この位置で開始')}${button('permission', '操作方式を選び直す', true)}<p class="error-text" id="calibration-message" role="status"></p></section>`;
   } else if (screen === 'select') {
-    html = `<section class="sheet selection">${header('03 / CHOOSE YOUR BREAD', '今日のパンは？', '3種類とも、最初から遊べます。')}<div class="bread-list">${BREAD_IDS.map(id => `<button data-bread="${id}" aria-pressed="${save.data.bread === id}" class="bread-card">${thumbs[id] ? `<img class="bread-thumb" src="${thumbs[id]}" alt="">` : `<span class="bread-emoji">${emoji[id]}</span>`}<span class="bread-info"><b>${BREADS[id].name}</b><small>${BREADS[id].note}</small>${abilities(id)}</span><i>${save.data.bread === id ? '✓' : ''}</i></button>`).join('')}</div><label class="opponent">対戦相手<select id="opponent">${BREAD_IDS.map(id => `<option value="${id}" ${save.data.cpu === id ? 'selected' : ''}>${BREADS[id].name}</option>`).join('')}</select></label><div class="difficulty" role="group" aria-label="CPUの強さ"><span>CPUの強さ</span>${DIFFICULTIES.map(d => `<button data-difficulty="${d}" aria-pressed="${level() === d}">${DIFFICULTY[d].label}</button>`).join('')}</div><p class="minor">${DIFFICULTY[level()].label}CPU · ${modes[input.mode]} · 60秒${level() === 'gentle' ? '' : ' · 相手も回避します'}</p>${button('start', practiceRequested || !save.data.practiced ? 'まずは短い練習へ →' : '対戦をはじめる →')}<div class="button-pair">${button('calibration', '構えを再調整', true)}${button('title', 'タイトルへ', true)}</div></section>`;
+    html = `<section class="sheet selection">${header('03 / CHOOSE YOUR BREAD', '今日のパンは？', '3種類とも、最初から遊べます。')}<div class="bread-list">${BREAD_IDS.map(id => `<button data-bread="${id}" aria-pressed="${save.data.bread === id}" class="bread-card">${thumbs[id] ? `<img class="bread-thumb" src="${thumbs[id]}" alt="">` : `<span class="bread-emoji">${emoji[id]}</span>`}<span class="bread-info"><b>${BREADS[id].name}</b><small>${BREADS[id].note}</small>${abilities(id)}</span><i>${save.data.bread === id ? '✓' : ''}</i></button>`).join('')}</div><label class="opponent">対戦相手<select id="opponent">${BREAD_IDS.map(id => `<option value="${id}" ${save.data.cpu === id ? 'selected' : ''}>${BREADS[id].name}</option>`).join('')}</select></label><div class="difficulty" role="group" aria-label="CPUの強さ"><span>CPUの強さ</span>${DIFFICULTIES.map(d => `<button data-difficulty="${d}" aria-pressed="${level() === d}">${DIFFICULTY[d].label}</button>`).join('')}</div><p class="minor">${DIFFICULTY[level()].label}CPU · ${modes[input.mode]} · 60秒${level() === 'gentle' ? '' : ' · 相手も回避します'}</p>${button('start', practiceRequested || !save.data.practiced ? 'まずは短い練習へ →' : '対戦をはじめる →')}${save.data.practiced && !save.data.practicedSpecial && !practiceRequested ? button('special-practice', 'NEW! ひっさつだけ練習する', true) : ''}<div class="button-pair">${button('calibration', '構えを再調整', true)}${button('title', 'タイトルへ', true)}</div></section>`;
   } else if (screen === 'practice-intro') {
-    html = `<section class="sheet">${header('WARM UP', '3つ試せば、準備OK', '練習ではHPが減りません。失敗しても大丈夫。')}<ol class="practice-list"><li>攻撃を当てる</li><li>予告を見て、横に避ける</li><li>避けた後の隙に、反撃を当てる</li></ol>${button('practice-start', '練習をはじめる')}${button('skip', '練習をスキップして対戦', true)}</section>`;
+    html = `<section class="sheet">${header('WARM UP', '4つ試せば、準備OK', '練習ではHPが減りません。失敗しても大丈夫。')}<ol class="practice-list"><li>攻撃を当てる</li><li>予告を見て、横に避ける</li><li>避けた後の隙に、反撃を当てる</li><li>ゲージMAXで「ひっさつ」を当てる</li></ol>${button('practice-start', '練習をはじめる')}${button('skip', '練習をスキップして対戦', true)}</section>`;
   } else if (screen === 'practice-done') {
-    html = `<section class="sheet">${header('READY TO BATTLE', 'いい構え！', drill ? `${drill === 1 ? '回避' : '反撃'}のコツをつかめました。<br>次は60秒のCPU戦です。` : '攻撃・回避・反撃を試せました。<br>次は60秒のCPU戦です。')}<p class="status-box">練習の成績は自己ベストに入りません。</p>${button('fight', 'CPUと勝負する →')}${button('practice-start', 'もう一度練習', true)}${button('select', 'パンを選び直す', true)}</section>`;
+    html = `<section class="sheet">${header('READY TO BATTLE', 'いい構え！', drill ? `${drillName(drill)}のコツをつかめました。<br>次は60秒のCPU戦です。` : '攻撃・回避・反撃・ひっさつを試せました。<br>次は60秒のCPU戦です。')}<p class="status-box">練習の成績は自己ベストに入りません。</p>${button('fight', 'CPUと勝負する →')}${button('practice-start', 'もう一度練習', true)}${button('select', 'パンを選び直す', true)}</section>`;
   } else if (screen === 'pause') {
     html = `<section class="sheet">${header('TAKE A BREATH', 'ちょっと、ひと休み')}<p id="pause-message" class="status-box"></p>${button('resume', '再開する →')}${button('calibration', '構えを再調整', true)}${settingsFields()}${button('permission', '操作方式を選び直す', true)}<p class="minor">操作方式を変えると、この対戦は終了します。</p>${button('title', 'この対戦を終了してタイトルへ', true)}<small>途中終了の成績は保存されません。</small></section>`;
   } else if (screen === 'settings') {
@@ -137,7 +203,7 @@ function draw(): void {
     const title = battle.outcome === 'win' ? 'こんがり、勝利！' : battle.outcome === 'lose' ? '次は、ひょいと回避。' : 'いい勝負、引き分け。';
     const dealt = Math.round(BREADS[battle.cpu.bread].hp - battle.cpu.hp), taken = Math.round(BREADS[battle.player.bread].hp - battle.player.hp);
     const rank = result ? `<div class="rank-card rank-${result.rank}"><div class="rank-letter" role="img" aria-label="ランク ${result.rank}">${result.rank}</div><div class="rank-score"><small>SCORE</small><b>${result.score}</b><span>${result.previous === null ? '初めての記録' : result.score > result.previous ? `ベスト更新！ 前回 ${result.previous}` : `自己ベスト ${result.previous}`}</span></div></div>` : '';
-    html = `<section class="sheet result">${header(battle.outcome === 'win' ? 'YOU WIN' : battle.outcome === 'lose' ? 'CPU WINS' : 'DRAW', title)}${rank}${result ? `<div class="next-tip"><b>次のコツ</b>${result.tip.text}${result.tip.drill ? `<button data-action="drill" class="drill">${result.tip.drill === 1 ? '回避' : '反撃'}だけ練習する →</button>` : ''}</div>` : ''}${button('rematch', '同じパンで、もう一戦 →')}<p class="result-condition">${BREADS[battle.player.bread].name} vs ${BREADS[battle.cpu.bread].name}<br>${DIFFICULTY[battle.difficulty].label}CPU · ${modes[input.mode]} · ${battle.elapsed.toFixed(1)}秒</p><div class="stat-grid">${stat('与ダメージ', String(dealt))}${stat('被ダメージ', String(taken))}${stat('命中', `${stats.player.hits}<small>/${stats.player.attacks}</small>`)}${stat('反撃', String(stats.player.counters))}</div><div class="scores">${scoreRow('回避', 'dodge')}${scoreRow('回避後の反撃', 'counter')}</div><p class="minor">自己ベストは同じパン・相手・操作・ルールで比較。<br>機会なしの項目は記録を更新しません。</p><div class="button-pair">${button('select', 'パンを選び直す', true)}${button('title', 'タイトルへ', true)}</div><details class="diagnostics"><summary>この試合の動作計測</summary><pre>${metricsText()}</pre></details></section>`;
+    html = `<section class="sheet result">${header(battle.outcome === 'win' ? 'YOU WIN' : battle.outcome === 'lose' ? 'CPU WINS' : 'DRAW', title)}${rank}${result ? `<div class="next-tip"><b>次のコツ</b>${result.tip.text}${result.tip.drill ? `<button data-action="drill" class="drill">${drillName(result.tip.drill)}だけ練習する →</button>` : ''}</div>` : ''}${button('rematch', '同じパンで、もう一戦 →')}<p class="result-condition">${BREADS[battle.player.bread].name} vs ${BREADS[battle.cpu.bread].name}<br>${DIFFICULTY[battle.difficulty].label}CPU · ${modes[input.mode]} · ${battle.elapsed.toFixed(1)}秒</p><div class="stat-grid">${stat('与ダメージ', String(dealt))}${stat('被ダメージ', String(taken))}${stat('命中', `${stats.player.hits}<small>/${stats.player.attacks}</small>`)}${stat('反撃', String(stats.player.counters))}${stat('ひっさつ', `${stats.player.specialHits}<small>/${stats.player.specials}</small>`)}</div><div class="scores">${scoreRow('回避', 'dodge')}${scoreRow('回避後の反撃', 'counter')}</div><p class="minor">自己ベストは同じパン・相手・操作・ルールで比較。<br>機会なしの項目は記録を更新しません。</p><div class="button-pair">${button('select', 'パンを選び直す', true)}${button('title', 'タイトルへ', true)}</div><details class="diagnostics"><summary>この試合の動作計測</summary><pre>${metricsText()}</pre></details></section>`;
   } else if (screen === 'error') {
     html = `<section class="sheet">${header('LET’S TRY AGAIN', '準備が止まっています')}<p class="error-text" id="fatal-message" role="alert"></p>${button('reload', '再読み込みして再試行')}${button('title', 'タイトルへ', true)}</section>`;
   }
@@ -176,7 +242,7 @@ function metricsText(): string {
   const m = renderer?.metrics(), s = input.metrics(), absent = '対象なし（センサー入力なし）';
   const threshold = s.minThreshold === null ? '' : ` / 試合中 ${s.minThreshold.toFixed(1)}〜${s.maxThreshold!.toFixed(1)} m/s²`;
   const sensor = `振りの強さ：${s.maxSwing === null ? absent : `最大 ${s.maxSwing.toFixed(1)} m/s²`}\n攻撃しきい値（設定） ${s.threshold.toFixed(1)} m/s²${threshold}\n左右傾き（構え基準）：${s.minTilt === null ? absent : `${s.minTilt.toFixed(1)}〜${s.maxTilt!.toFixed(1)}度`}`;
-  return m ? `平均 ${m.fps.toFixed(1)} fps / p95 ${m.p95FrameMs.toFixed(1)} ms\n33.4ms超 ${m.slowFrames}/${m.frames} frames\n検出→表示 ${m.attackSamples ? `最大 ${m.maxAttackMs.toFixed(1)} ms（${m.attackSamples}回）` : '対象なし（攻撃入力なし）'}\n${sensor}\n${m.triangles} triangles / ${m.drawCalls} draws\n${RULE} / 攻撃感度 ${save.data.attackSensitivity.toFixed(1)} / 回避感度 ${save.data.tiltSensitivity.toFixed(1)}\n${escapeHtml(navigator.userAgent)}\n※この端末での計測。実機センサー試行は別途必要。` : '計測なし';
+  return m ? `平均 ${m.fps.toFixed(1)} fps / p95 ${m.p95FrameMs.toFixed(1)} ms\n33.4ms超 ${m.slowFrames}/${m.frames} frames\n検出→表示 ${m.attackSamples ? `最大 ${m.maxAttackMs.toFixed(1)} ms（${m.attackSamples}回）` : '対象なし（攻撃入力なし）'}\n${sensor}\n${m.triangles} triangles / ${m.drawCalls} draws\n${SPECIAL_RULE} / 攻撃感度 ${save.data.attackSensitivity.toFixed(1)} / 回避感度 ${save.data.tiltSensitivity.toFixed(1)}\n${escapeHtml(navigator.userAgent)}\n※この端末での計測。実機センサー試行は別途必要。` : '計測なし';
 }
 function updateShareButton(): void {
   const element = screenElement.querySelector<HTMLButtonElement>('[data-action="share"]'); if (!element) return;
@@ -196,25 +262,40 @@ function updateHud(): void {
   const p = document.querySelector<HTMLElement>('#player-health'), c = document.querySelector<HTMLElement>('#cpu-health');
   if (!p || !c) return;
   p.style.width = `${battle.player.hp}%`; c.style.width = `${battle.cpu.hp}%`;
+  for (const side of ['player', 'cpu'] as const) {
+    const meter = battle[side].meter ?? 0, full = meter >= METER_MAX, element = document.querySelector<HTMLElement>(`#${side}-meter`);
+    if (!element) continue;
+    element.querySelector<HTMLElement>('i')!.style.width = `${meter}%`; element.classList.toggle('full', full);
+    element.setAttribute('aria-label', `${side === 'player' ? '' : 'CPUの'}ひっさつゲージ ${Math.floor(meter)}%`);
+    const tag = document.querySelector<HTMLElement>(`#${side}-meter-tag`)!, text = full ? 'MAX' : '';
+    if (tag.textContent !== text) tag.textContent = text;
+  }
+  const meter = battle.player.meter ?? 0, ready = battle.canSpecial('player'), label = ready ? 'ひっさつ！' : drillDodge() ? 'まずは見切ろう' : meter >= METER_MAX ? 'MAX · 戻ったら使える' : `ひっさつ ${Math.floor(meter)}%`;
+  specialButton.classList.toggle('ready', ready); specialButton.classList.toggle('busy', meter >= METER_MAX && !ready && !drillDodge());
+  specialButton.style.setProperty('--fill', `${meter}%`); specialButton.setAttribute('aria-disabled', String(!ready));
+  const specialText = specialButton.querySelector<HTMLElement>('.special-text')!; if (specialText.textContent !== label) specialText.textContent = label;
   document.querySelector<HTMLElement>('#player-ghost')!.style.width = `${battle.player.hp}%`; document.querySelector<HTMLElement>('#cpu-ghost')!.style.width = `${battle.cpu.hp}%`;
   p.closest('.health')?.classList.toggle('critical', battle.player.hp > 0 && battle.player.hp <= 25);
   document.querySelector('#player-hp')!.textContent = String(Math.ceil(battle.player.hp)); document.querySelector('#cpu-hp')!.textContent = String(Math.ceil(battle.cpu.hp));
   document.querySelector('#timer')!.textContent = screen === 'practice' ? '∞' : String(Math.max(0, Math.ceil(60 - battle.elapsed)));
   document.querySelector('#timer')!.classList.toggle('urgent', screen === 'battle' && battle.elapsed >= 50 && !battle.outcome);
   const status = document.querySelector<HTMLElement>('#battle-status')!;
-  const threat = phase(battle.cpu) === 'windup', locked = ['windup', 'active'].includes(phase(battle.player));
-  status.textContent = locked ? '振り切るまで、横移動できません' : battle.player.recoil > 0 ? '弾かれた！ 体勢を立て直し中' : threat ? '相手が狙っています → 横へ回避！' : battle.counterAvailable && battle.elapsed < battle.counterUntil ? '今が反撃のチャンス！' : phase(battle.player) === 'recovery' ? '構えに戻しています · 横移動OK' : '攻撃できます · 相手の動きを見よう';
-  status.className = `status-line ${threat ? 'danger' : ''}`;
+  const threat = phase(battle.cpu) === 'windup', locked = !movable(battle.player);
+  const cpuSpecial = !!battle.cpu.attack?.special && ['windup', 'active'].includes(phase(battle.cpu)), mine = !!battle.player.attack?.special && ['windup', 'active'].includes(phase(battle.player));
+  status.textContent = battle.cutin ? battle.cutin.side !== 'player' ? '相手のひっさつ！ 赤い範囲から横へ逃げろ！' : 'ひっさつ発動！' : cpuSpecial ? '相手のひっさつ！ 赤い範囲から横へ逃げろ！' : mine ? 'ひっさつ発動中！ いけー！' : locked && phase(battle.player) === 'recovery' ? 'ひっさつの反動 · 少しだけ動けない' : locked ? '振り切るまで、横移動できません' : battle.player.recoil > 0 ? '弾かれた！ 体勢を立て直し中' : threat ? '相手が狙っています → 横へ回避！' : battle.counterAvailable && battle.elapsed < battle.counterUntil ? '今が反撃のチャンス！' : phase(battle.player) === 'recovery' ? '構えに戻しています · 横移動OK' : '攻撃できます · 相手の動きを見よう';
+  status.className = `status-line ${threat || (battle.cutin && battle.cutin.side !== 'player') ? 'danger' : ''}`;
   const tip = document.querySelector('#play-tip');
   if (tip) {
     if (screen === 'practice') {
-      const key = `${practiceStage}/${input.mode}`;
+      const key = `${practiceStage}/${input.mode}/${battle.specialStep}`;
       if ((tip as HTMLElement).dataset.stage !== key) {
         (tip as HTMLElement).dataset.stage = key;
-        tip.innerHTML = `<b>${practiceStage + 1} / 3　${['まずは、攻撃を当てよう', '相手が引いたら、横に避けよう', '避けた隙に、すぐ反撃しよう'][practiceStage] ?? ''}</b><span>${input.mode === 'sensor' ? '軽く振る → 攻撃 / 左右に傾ける → 回避' : input.mode === 'touch' ? '左右を押して回避 / 中央ボタンで攻撃' : '← →で回避 / Spaceで攻撃'}</span><button data-action="skip">練習をスキップ</button>`;
+        const special = practiceStage === PRACTICE_SPECIAL_STAGE;
+        const dodge = special && battle.specialStep === 'dodge';
+        tip.innerHTML = `<b>${practiceStage + 1} / 4　${['まずは、攻撃を当てよう', '相手が引いたら、横に避けよう', '避けた隙に、すぐ反撃しよう', dodge ? 'CPUのひっさつを見切ろう！' : 'ゲージMAX！ ひっさつを当てよう'][practiceStage] ?? ''}</b><span>${dodge ? '赤い範囲が出たら、大きく横へ逃げよう' : special ? `${input.mode === 'keyboard' ? 'Xキー' : '光る「ひっさつ」ボタン'}で発動 · 練習用に満タン` : input.mode === 'sensor' ? '軽く振る → 攻撃 / 左右に傾ける → 回避' : input.mode === 'touch' ? '左右を押して回避 / 中央ボタンで攻撃' : '← →で回避 / Spaceで攻撃'}</span><button data-action="skip">練習をスキップ</button>`;
       }
     } else {
-      const text = input.mode === 'sensor' ? '軽く振って攻撃 · 傾けて回避' : input.mode === 'keyboard' ? '← → / A D：回避　 Space / Z：攻撃' : '押して移動 · 離すと中央へ';
+      const text = input.mode === 'sensor' ? '軽く振って攻撃 · 傾けて回避' : input.mode === 'keyboard' ? '← →：回避　Space：攻撃　X：ひっさつ' : '押して移動 · 離すと中央へ';
       if (tip.textContent !== text) tip.textContent = text;
     }
   }
@@ -222,20 +303,22 @@ function updateHud(): void {
 function stanceCue(): StanceCue {
   const p = phase(battle.player);
   // Mirrors startAttack(): no new swing while one is running or while knocked back.
-  return p === 'windup' || p === 'active' || battle.player.recoil > 0 ? 'locked' : battle.counterAvailable && battle.elapsed < battle.counterUntil ? 'counter' : p === 'recovery' ? 'recovery' : 'ready';
+  return p === 'windup' || p === 'active' || !movable(battle.player) || battle.player.recoil > 0 ? 'locked' : battle.canSpecial('player') ? 'charged' : battle.counterAvailable && battle.elapsed < battle.counterUntil ? 'counter' : p === 'recovery' ? 'recovery' : 'ready';
 }
 function pause(reason: string): void {
   if (!['battle', 'practice', 'countdown', 'replay'].includes(screen)) return;
   resumeScreen = screen; message = reason; audio.silence(); transition('pause');
 }
 function fail(reason: string): void { fatal = reason; ready = false; transition('error'); }
-function begin(practice: boolean, stage = 0, only: 0 | 1 | 2 = 0): void {
+function begin(practice: boolean, stage = 0, only: 0 | 1 | 2 | 3 = 0): void {
   if (!ready) { fail('パンの読み込みが完了していません。再試行してください。'); return; }
   if (input.mode === 'sensor' && (!input.sensor.fresh(performance.now()) || input.sensor.baseline === null)) { message = '新しい入力と構え位置を確認してください。'; calibrationReturn = 'select'; pendingBegin = { practice, stage, drill: only }; transition('calibrate'); return; }
   battle = new Battle(save.data.bread, save.data.cpu, { practice, seed: practice || testMode ? 42 : crypto.getRandomValues(new Uint32Array(1))[0]!, difficulty: level() });
   stats = emptyStats(); result = null; lastCount = 0; popups.replaceChildren();
   shareGeneration++; shareFile = null; sharePreparing = shareFailed = sharing = false;
   previousBest = {}; input.clear(); input.resetMetrics(); renderer?.resetMetrics(); practiceStage = stage; battle.practiceStage = stage; drill = practice ? only : 0; pendingBegin = null; toast.textContent = '';
+  if (practice && stage === PRACTICE_SPECIAL_STAGE) battle.enterSpecialPractice();
+  meterSeen = { player: battle.player.meter ?? 0, cpu: battle.cpu.meter ?? 0 }; specialLanded = false; cpuCharged = false; hitsShown = { player: -1, cpu: -1 }; hideCutin();
   if (practice) transition('practice'); else { countdown = 3; transition('countdown'); }
 }
 async function action(actionName: string): Promise<void> {
@@ -260,6 +343,7 @@ async function action(actionName: string): Promise<void> {
   } else if (actionName === 'select') { pendingBegin = null; renderer?.setEnding(null); practiceRequested = false; battle = new Battle(save.data.bread, save.data.cpu); transition('select');
   } else if (actionName === 'start') { save.persist(); if (practiceRequested || !save.data.practiced) transition('practice-intro'); else begin(false);
   } else if (actionName === 'practice-start') begin(true);
+  else if (actionName === 'special-practice') begin(true, PRACTICE_SPECIAL_STAGE, 3);
   else if (actionName === 'skip' || actionName === 'fight') { save.data.practiced = true; save.persist(); practiceRequested = false; begin(false);
   } else if (actionName === 'rematch') begin(false);
   else if (actionName === 'drill' && result?.tip.drill) {
@@ -353,24 +437,58 @@ function frame(now: number): void {
   if (active && input.mode === 'sensor' && !input.sensor.fresh(now)) pause('動きの入力が途切れました。入力を確認してから再開してください。');
   if (screen === 'battle' || screen === 'practice') {
     const hpBefore = [battle.player.hp, battle.cpu.hp] as const;
-    const attack = input.consume();
-    if (attack && !battle.player.attack && battle.player.recoil <= 0) acceptedAt = input.detectedAt;
+    const attack = input.consume(), special = input.consumeSpecial(), specialOk = special && battle.canSpecial('player');
+    if (special && !specialOk && !battle.freezing && now - lastReject > 600) { lastReject = now; say(specialReason(), .9); }
+    if (specialOk) acceptedAt = performance.now();
+    else if (attack && battle.freezing) { /* Dropped during the cut-in, like every other input. */ }
+    else if (attack && !battle.player.attack && battle.player.recoil <= 0) acceptedAt = input.detectedAt;
     else if (attack && now - lastReject > 900) { lastReject = now; say(battle.player.recoil > 0 ? '弾かれ中 · 少し待って振ろう' : '振り切り中 · 戻ってから振ろう', .7); }
-    battle.advance(dt, input.target(), attack);
+    battle.advance(dt, input.target(), attack, special);
     const events = battle.drainEvents(), countered = new Set(events.filter(e => e.kind === 'counter').map(e => e.side));
+    const specialHits = new Set(events.filter(e => e.kind === 'special-hit' && finalStage(e)).map(e => e.side));
+    const started = events.filter(e => e.kind === 'special').map(e => e.side);
+    if (started.length) { showCutin(started.length > 1 ? 'both' : started[0]!); audio.duck(CUTIN_SECONDS + .2); }
     for (const [side, before] of [['player', hpBefore[0]], ['cpu', hpBefore[1]]] as const) {
-      const lost = before - battle[side].hp;
-      if (lost > 0) { popup(side, `-${Math.round(lost)}`, countered.has(side === 'player' ? 'cpu' : 'player') ? 'counter' : side === 'player' ? 'hurt' : 'deal'); hurt(side); }
+      const lost = before - battle[side].hp, by = side === 'player' ? 'cpu' : 'player';
+      if (lost > 0) { popup(side, `-${Math.round(lost)}`, specialHits.has(by) ? 'special' : countered.has(by) ? 'counter' : side === 'player' ? 'hurt' : 'deal'); hurt(side); }
     }
     for (const event of events) {
       if (!battle.practice) recordStat(stats, event);
-      else if (event.kind === 'hit' || event.kind === 'clash') for (const side of ['player', 'cpu'] as const) if (event.kind === 'clash' || side !== event.side) popup(side, 'HIT!', side === 'player' ? 'hurt' : 'deal');
+      else if (event.kind === 'hit' || event.kind === 'clash') { for (const side of ['player', 'cpu'] as const) if (event.kind === 'clash' || side !== event.side) popup(side, 'HIT!', side === 'player' ? 'hurt' : 'deal'); }
+      else if (event.kind === 'special-hit') popup(event.side === 'player' ? 'cpu' : 'player', 'HIT!', finalStage(event) ? 'special' : 'combo');
+      // Multi-hit moves: light marks on the early stages, then the landed count and the big finish on the last one.
+      if (event.kind === 'special-hit') popup(event.side === 'player' ? 'cpu' : 'player', SPECIALS[battle[event.side].bread].sfx[event.stage ?? 0] ?? '', finalStage(event) ? 'sfx' : 'combo', finalStage(event) ? 1.75 : 1.5);
+      if (screen === 'practice' && practiceStage === PRACTICE_SPECIAL_STAGE && battle.specialStep === 'dodge' && event.kind === 'dodge' && event.side === 'player' && event.special) {
+        battle.specialFire(); meterSeen.player = battle.player.meter ?? 0; specialLanded = false; banner('見切った！', 'charged'); stepNotice = ['次はきみの番！ ひっさつを当てよう', 2];
+      }
+      // Only a special fired in the drill's "fire" step completes stage 4.
+      if (event.kind === 'special-hit' && event.side === 'player' && practiceStage === PRACTICE_SPECIAL_STAGE && battle.specialStep === 'fire') specialLanded = true;
       present(event);
       if (screen === 'practice') {
         if (practiceStage === 0 && event.kind === 'hit' && event.side === 'player') { practiceStage = 1; battle.practiceStage = 1; say('攻撃できました！ 次は横に回避', 2); }
         else if (practiceStage === 1 && event.kind === 'dodge' && event.side === 'player') { if (drill === 1) transition('practice-done'); else { practiceStage = 2; battle.practiceStage = 2; } }
-        else if (practiceStage === 2 && event.kind === 'counter') { save.data.practiced = true; save.persist(); transition('practice-done'); }
+        else if (practiceStage === 2 && event.kind === 'counter') {
+          save.data.practiced = true; save.persist();
+          if (drill === 2) transition('practice-done');
+          else {
+            practiceStage = PRACTICE_SPECIAL_STAGE; battle.enterSpecialPractice(); specialLanded = false;
+            meterSeen = { player: battle.player.meter ?? 0, cpu: battle.cpu.meter ?? 0 }; banner('ひっさつ！', 'rage'); stepNotice = ['最後はひっさつ！ まずはCPUのひっさつを見切ろう', 2];
+          }
+        }
       }
+    }
+    watchMeters(); chargingSeen = battle.cpuCharging;
+    // Multi-hit moves report how many stages actually landed once their hit window closes (or the match ends mid-move).
+    for (const side of ['player', 'cpu'] as const) {
+      const fighter = battle[side], attack = fighter.attack;
+      if (!attack?.special?.landed || hitsShown[side] === attack.id || SPECIALS[fighter.bread].stages.length < 2) continue;
+      if (phase(fighter) !== 'recovery' && !battle.outcome) continue;
+      hitsShown[side] = attack.id; popup(side === 'player' ? 'cpu' : 'player', `${landedStages(side)}HIT!`, 'combo', 1.25);
+    }
+    if (battle.cpuCharging && !cpuCharged) { cpuCharged = true; banner('CPUが本気だ！', 'rage'); say('CPUのゲージが一気にたまる！ ひっさつに注意', 1.8); }
+    // The special drill ends once a special has landed and finished, so the whole move plays out.
+    if (screen === 'practice' && practiceStage === PRACTICE_SPECIAL_STAGE && battle.specialStep === 'fire' && specialLanded && !battle.player.attack?.special) {
+      save.data.practicedSpecial = true; save.persist(); transition('practice-done');
     }
     if (battle.paused && ['battle', 'practice'].includes(screen)) pause('更新が中断したので一時停止しました。');
     updateHud();
@@ -378,7 +496,7 @@ function frame(now: number): void {
   flushNotices(screen === 'battle' || screen === 'practice');
   if (ready && renderer && !document.hidden) {
     try {
-      renderer.render(battle, active ? battle.elapsed : now / 1000, active ? Math.min(dt, .1) : 0, active && !battle.paused, { ...(battle.practice ? {} : { remaining: 60 - battle.elapsed }), cue: stanceCue() });
+      renderer.render(battle, active ? battle.elapsed : now / 1000, active ? Math.min(dt, .1) : 0, active && !battle.paused, { ...(battle.practice ? {} : { remaining: 60 - battle.elapsed }), cue: stanceCue(), frozen: battle.freezing, charging: battle.cpuCharging });
       if (acceptedAt !== null) { renderer.noteLatency(performance.now() - acceptedAt); acceptedAt = null; }
       if (battle.outcome && screen === 'battle') {
         previousBest = save.record(battle, input.mode);

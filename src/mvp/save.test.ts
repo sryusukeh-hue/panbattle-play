@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Battle } from './battle';
 import { SaveStore, SAVE_KEY, condition, defaults, rate } from './save';
+import { RULE, SPECIAL_RULE } from '../shared/rules';
 function memory() {
   const map = new Map<string, string>([['panbattle.save', '{"old":"keep exactly"}']]);
   return { map, getItem: (key: string) => map.get(key) ?? null, setItem: (key: string, value: string) => { map.set(key, value); } };
@@ -70,7 +71,7 @@ describe('separate 3D save and scores', () => {
     const practice = new Battle('shokupan', 'shokupan', { practice: true }); practice.outcome = 'win';
     expect(store.recordScore(practice, 'touch', 99)).toBeNull(); expect(Object.keys(store.data.bestScoreV2!)).toHaveLength(1);
   });
-  it.each([{ difficulty: 'extreme' }, { music: 'yes' }, { bestScoreV2: { 'table-1/shokupan/shokupan/hard/touch': 101 } }, { bestScoreV2: { nope: 5 } }, { bestScoreV2: [] }])('rejects invalid optional field %j without replacing it', extra => {
+  it.each([{ difficulty: 'extreme' }, { music: 'yes' }, { bestScoreV2: { 'table-1/shokupan/shokupan/hard/touch': 101 } }, { bestScoreV2: { nope: 5 } }, { bestScoreV2: [] }, { practicedSpecial: 'yes' }, { best: { 'table-2/shokupan/shokupan/gentle/touch': {} } }, { bestScoreV2: { 'table-special-2/shokupan/shokupan/gentle/touch': 5 } }])('rejects invalid optional field %j without replacing it', extra => {
     const storage = memory(), raw = JSON.stringify({ ...defaults(), ...extra }); storage.setItem(SAVE_KEY, raw);
     const store = new SaveStore(() => storage); expect(store.warning).not.toBe(''); expect(store.persist()).toBe(false); expect(storage.getItem(SAVE_KEY)).toBe(raw);
   });
@@ -80,7 +81,21 @@ describe('separate 3D save and scores', () => {
     const store = new SaveStore(() => storage), b = new Battle('shokupan', 'shokupan'); b.outcome = 'win';
     expect(store.warning).toBe(''); expect(store.recordScore(b, 'touch', 50)).toBeNull();
     const saved = JSON.parse(storage.getItem(SAVE_KEY)!);
-    expect(saved.bestScore).toEqual(legacy.bestScore); expect(saved.bestScoreV2).toEqual({ 'table-1/shokupan/shokupan/gentle/touch': 50 });
+    expect(saved.bestScore).toEqual(legacy.bestScore); expect(saved.bestScoreV2).toEqual({ 'table-special-1/shokupan/shokupan/gentle/touch': 50 });
+  });
+  it('compares matches with specials under their own rule while keeping pre-special records untouched', () => {
+    const storage = memory(), old = 'table-1/shokupan/shokupan/gentle/touch', legacy = { ...defaults(), practicedSpecial: true,
+      best: { [old]: { dodge: { success: 4, opportunities: 4 }, counter: { success: 2, opportunities: 2 } } }, bestScoreV2: { [old]: 99 } };
+    storage.setItem(SAVE_KEY, JSON.stringify(legacy));
+    const store = new SaveStore(() => storage), b = new Battle('shokupan', 'shokupan'); b.outcome = 'win';
+    expect(store.warning).toBe(''); expect(store.data.practicedSpecial).toBe(true);
+    expect(condition('shokupan', 'shokupan', 'touch')).toBe(`${SPECIAL_RULE}/shokupan/shokupan/gentle/touch`); expect(SPECIAL_RULE).not.toBe(RULE);
+    // The old perfect record and 99 are never the comparison baseline for a new match.
+    b.scores.dodge = { success: 1, opportunities: 2 };
+    expect(store.record(b, 'touch')).toEqual({}); expect(store.recordScore(b, 'touch', 40)).toBeNull();
+    const saved = JSON.parse(storage.getItem(SAVE_KEY)!);
+    expect(saved.best[old]).toEqual(legacy.best[old]); expect(saved.bestScoreV2[old]).toBe(99);
+    expect(saved.best[condition('shokupan', 'shokupan', 'touch')].dodge).toEqual({ success: 1, opportunities: 2 }); expect(saved.bestScoreV2[condition('shokupan', 'shokupan', 'touch')]).toBe(40);
+    expect(new SaveStore(() => storage).warning).toBe('');
   });
 });
-

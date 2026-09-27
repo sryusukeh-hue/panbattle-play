@@ -7,6 +7,8 @@ export type BreadId = keyof typeof BREADS;
 export const BREAD_IDS = Object.keys(BREADS) as BreadId[];
 export type Mode = 'sensor' | 'touch' | 'keyboard';
 export const RULE = 'table-1';
+// CPU matches with specials; records under RULE are kept but no longer compared.
+export const SPECIAL_RULE = 'table-special-1';
 export const ONLINE_RULE = 'table-pvp-1';
 export type Ruleset = 'cpu' | 'pvp';
 // Initial PvP timings; two-iPhone playtesting is still required.

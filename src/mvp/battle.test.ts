@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { Battle, CPU_RECOVER_GAP, CPU_STYLE, DIFFICULTY, HIT_STOP_SECONDS, phase, pose, touching } from './battle';
+import { Battle, CPU_RAGE, CPU_RECOVER_GAP, CPU_STYLE, DIFFICULTY, HIT_STOP_SECONDS, PRACTICE_SPECIAL_STAGE, phase, pose, touching } from './battle';
+import { CUTIN_SECONDS, SPECIALS } from '../shared/specials';
 import { BREADS, BREAD_IDS, LIMIT, STEP, type BreadId } from './config';
 import { createBattle, startAttack, stepBattle, type BattleEvent as SharedEvent } from '../shared/battle';
 
@@ -105,7 +106,7 @@ describe('CPU policy comparison', () => {
         b.advance(STEP, Math.sin(i * .01));
         const attack = b.cpu.attack;
         if (attack) {
-          if (!aims.has(attack.id)) { aims.set(attack.id, attack.aim); starts.push({ time: b.elapsed, aim: attack.aim, windup: attack.windup, recovery: attack.recovery }); }
+          if (!aims.has(attack.id)) { aims.set(attack.id, attack.aim); if (!attack.special) starts.push({ time: b.elapsed, aim: attack.aim, windup: attack.windup, recovery: attack.recovery }); }
           expect(attack.aim).toBe(aims.get(attack.id));
         }
         if (i % 30 === 0) positions.push(b.cpu.x);
@@ -146,6 +147,7 @@ describe('CPU policy comparison', () => {
 describe('CPU difficulty', () => {
   function swings(difficulty: 'gentle' | 'normal' | 'hard') {
     const b = new Battle('shokupan', 'shokupan', { seed: 7, difficulty }); b.player.hp = 10000; b.cpu.hp = 10000;
+    b.state.specials = false; // normal-swing policy only; specials have their own tests
     let misses = 0, windup = Infinity, dodges = 0;
     for (let i = 0; i < 40 / STEP; i++) {
       b.advance(STEP, 0, !b.player.attack && i % 90 === 0);
@@ -220,5 +222,74 @@ describe('CPU reads (round 3 fixes)', () => {
       const { cpuExtra: _ignored, ...rest } = s; return JSON.stringify({ rest, events });
     };
     expect(run(true)).toBe(run(false));
+  });
+});
+
+describe('CPU battle specials', () => {
+  it('the cut-in freezes combat time in real time, drops inputs, and never catches up afterwards', () => {
+    const b = duel(); b.player.meter = 100;
+    b.advance(STEP, 0, true, true);
+    expect(b.freezing).toBe(true); expect(b.cutin?.side).toBe('player'); expect(b.player.attack?.special).toBeTruthy(); expect(b.player.meter).toBe(0);
+    const frozen = structuredClone(b.state);
+    for (let t = 0; t < CUTIN_SECONDS - .05; t += STEP) b.advance(STEP, LIMIT, true, true);
+    expect(b.state).toEqual(frozen); expect(b.drainEvents().filter(e => e.kind === 'attack')).toHaveLength(0);
+    run(b, .1, LIMIT); expect(b.freezing).toBe(false); expect(b.cutin).toBeNull();
+    expect(b.elapsed).toBeLessThan(.1); expect(b.player.attack?.age).toBeLessThan(.1);
+  });
+  it('a pause during the cut-in keeps the remaining freeze', () => {
+    const b = duel(); b.player.meter = 100; b.advance(STEP, 0, false, true); b.advance(.2, 0);
+    const left = b.cutin!.left; b.setPaused(true); b.advance(.2, 0); expect(b.cutin!.left).toBe(left);
+    b.setPaused(false); b.advance(.2, 0); expect(b.cutin!.left).toBeCloseTo(left - .2);
+  });
+  it('a CPU special due on the same update joins the player special in one cut-in', () => {
+    const b = new Battle('shokupan', 'francepan', { seed: 3, difficulty: 'normal' });
+    const hidden = b as unknown as { nextCpu: number; fullSince: number };
+    b.player.meter = 100; b.cpu.meter = 100; hidden.fullSince = -10; hidden.nextCpu = 0;
+    b.advance(STEP, 0, false, true);
+    expect(b.cutin?.side).toBe('both'); expect(b.drainEvents().filter(e => e.kind === 'special').map(e => e.side)).toEqual(['player', 'cpu']);
+    expect(b.cpu.attack!.windup).toBeCloseTo(SPECIALS.francepan.windup + DIFFICULTY.normal.specialWindup);
+  });
+  it('once per match at 60% HP the CPU charges a full meter over 1.5 s and then fires a dodgeable special', () => {
+    const b = new Battle('shokupan', 'croissant', { seed: 5 }); b.cpu.hp = 60; b.player.hp = 1000;
+    run(b, STEP * 2); expect(b.cpuCharging).toBe(true);
+    run(b, CPU_RAGE.seconds / 2); expect(b.cpu.meter).toBeGreaterThan(40); expect(b.cpu.meter).toBeLessThan(60);
+    run(b, CPU_RAGE.seconds / 2 + .05); expect(b.cpu.meter).toBe(100); expect(b.cpuCharging).toBe(false);
+    let fired = false;
+    for (let i = 0; i < 12 / STEP && !fired; i++) { b.advance(STEP, b.player.x); fired = b.drainEvents().some(e => e.kind === 'special' && e.side === 'cpu'); }
+    expect(fired).toBe(true);
+    run(b, 5); b.cpu.meter = 0; run(b, 3);
+    expect(b.cpuCharging).toBe(false); expect(b.cpu.meter).toBeLessThan(100); // never a second charge
+  });
+  it('the CPU charge always takes the full 1.5 s, even from a partly filled meter', () => {
+    const b = new Battle('shokupan', 'shokupan', { seed: 9 }); b.cpu.hp = 50; b.cpu.meter = 75; b.player.hp = 1000;
+    run(b, STEP * 2); expect(b.cpuCharging).toBe(true);
+    b.cpu.meter = 99.5; // a hit landed mid-charge cannot finish it early
+    run(b, CPU_RAGE.seconds - .1); expect(b.cpu.meter).toBeLessThan(100); expect(b.canSpecial('cpu')).toBe(false);
+    run(b, .15); expect(b.cpu.meter).toBe(100);
+  });
+  it('a CPU hit or dodge landing during the charge never shows a full meter before 1.5 s', () => {
+    const b = new Battle('shokupan', 'shokupan', { seed: 11 }); b.cpu.hp = 50; b.cpu.meter = 80; b.player.hp = 1000;
+    b.advance(STEP, 0); expect(b.cpuCharging).toBe(true); b.attack('cpu');
+    let hit = false;
+    for (let t = STEP; t < CPU_RAGE.seconds - .05; t += STEP) { b.advance(STEP, 0); hit ||= b.drainEvents().some(e => e.kind === 'hit' && e.side === 'cpu'); expect(b.cpu.meter).toBeLessThan(100); }
+    // The charge counts combat time, so the hit stop pushes completion slightly later in real time.
+    expect(hit).toBe(true); run(b, .2, 0); expect(b.cpu.meter).toBe(100);
+  });
+  it('practice stage 4: see and dodge the CPU special, then fire your own; nothing ever hurts', () => {
+    const b = new Battle('croissant', 'shokupan', { practice: true }); b.practiceStage = PRACTICE_SPECIAL_STAGE; b.enterSpecialPractice();
+    expect(b.cpu.meter).toBe(100); expect(b.player.meter).toBe(0);
+    b.player.meter = 100; expect(b.canSpecial('player')).toBe(false); // no own special before the dodge
+    b.advance(STEP, 0, false, true); expect(b.special('player')).toBe(false); expect(b.player.attack).toBeNull(); b.player.meter = 0;
+    let seen = false;
+    for (let i = 0; i < 4 / STEP && !seen; i++) { b.advance(STEP, 0); seen = !!b.cpu.attack?.special; }
+    expect(seen).toBe(true); expect(b.cpu.attack!.windup).toBeCloseTo(SPECIALS.shokupan.windup + DIFFICULTY.gentle.specialWindup);
+    for (let i = 0; i < 4 / STEP && (b.cpu.attack || b.freezing); i++) b.advance(STEP, LIMIT);
+    expect(b.drainEvents().some(e => e.kind === 'dodge' && e.side === 'player' && e.special)).toBe(true);
+    b.specialFire(); expect(b.player.meter).toBe(100);
+    run(b, .5, 0); b.advance(STEP, 0, false, true); run(b, CUTIN_SECONDS + 2, 0);
+    expect(b.drainEvents().filter(e => e.kind === 'special-hit' && e.side === 'player').length).toBeGreaterThan(0);
+    expect([b.player.hp, b.cpu.hp]).toEqual([100, 100]);
+    run(b, 1.2, 0); expect(b.player.meter).toBe(100); // refilled for another try
+    expect(b.cpu.attack?.special).toBeFalsy();
   });
 });

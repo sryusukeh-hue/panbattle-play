@@ -7,6 +7,8 @@ const emptyMetrics = (): SensorMetrics => ({ maxSwing: null, minTilt: null, maxT
 export class GameInput {
   mode: Mode = 'touch'; sensor = new MotionFilter(); enabled = false; pending = false;
   detectedAt = -Infinity; private left = false; private right = false;
+  // Special requests: one per tap or X key press, in every control mode; never queued across a clear().
+  private specialPending = false; private specialPointer: number | null = null;
   private pointerDirections = new Map<number, number>(); private held = new Set<string>();
   private attached = false;
   private lastGravityAt = -Infinity;
@@ -14,9 +16,11 @@ export class GameInput {
   constructor(controls: HTMLElement, private pause: () => void) {
     window.addEventListener('keydown', e => {
       if (e.code === 'Escape') { e.preventDefault(); this.pause(); return; }
-      if (!this.enabled || this.mode !== 'keyboard' || (e.target instanceof HTMLElement && /INPUT|SELECT|BUTTON/.test(e.target.tagName))) return;
-      if (['ArrowLeft', 'ArrowRight', 'KeyA', 'KeyD', 'Space', 'KeyZ'].includes(e.code)) e.preventDefault();
+      // The special button is a game control: keys still steer and attack while it has focus.
+      if (!this.enabled || this.mode !== 'keyboard' || (e.target instanceof HTMLElement && /INPUT|SELECT|BUTTON/.test(e.target.tagName) && e.target.id !== 'special')) return;
+      if (['ArrowLeft', 'ArrowRight', 'KeyA', 'KeyD', 'Space', 'KeyZ', 'KeyX'].includes(e.code)) e.preventDefault();
       if (e.repeat || this.held.has(e.code)) return;
+      if (e.code === 'KeyX') { this.held.add(e.code); this.specialPending = true; return; }
       this.held.add(e.code); this.keys();
       if (e.code === 'Space' || e.code === 'KeyZ') this.trigger();
     });
@@ -34,6 +38,24 @@ export class GameInput {
     controls.addEventListener('click', e => { if ((e as MouseEvent).detail === 0 && this.enabled && this.mode === 'touch' && (e.target as HTMLElement).closest('[data-control="attack"]')) this.trigger(); });
     window.addEventListener('blur', () => this.clear());
   }
+  // The special button fires when a press that started on it also ends on it; cancel or lost capture drops it.
+  bindSpecial(button: HTMLElement): void {
+    button.addEventListener('pointerdown', e => {
+      if (!this.enabled) return;
+      e.preventDefault(); this.specialPointer = e.pointerId; button.setPointerCapture?.(e.pointerId);
+    });
+    button.addEventListener('pointerup', e => {
+      if (this.specialPointer !== e.pointerId) return;
+      this.specialPointer = null;
+      const box = button.getBoundingClientRect();
+      if (this.enabled && e.clientX >= box.left && e.clientX <= box.right && e.clientY >= box.top && e.clientY <= box.bottom) this.specialPending = true;
+    });
+    const cancel = (e: PointerEvent): void => { if (this.specialPointer === e.pointerId) this.specialPointer = null; };
+    button.addEventListener('pointercancel', cancel); button.addEventListener('lostpointercapture', cancel);
+    // Keyboard activation of the focused button (Enter/Space) arrives as a click with detail 0.
+    button.addEventListener('click', e => { if ((e as MouseEvent).detail === 0 && this.enabled) { this.specialPending = true; button.blur(); } });
+  }
+  consumeSpecial(): boolean { const value = this.specialPending; this.specialPending = false; return value; }
   private keys(): void { this.left = this.held.has('ArrowLeft') || this.held.has('KeyA'); this.right = this.held.has('ArrowRight') || this.held.has('KeyD'); }
   private trigger(): void { if (!this.enabled) return; this.pending = true; this.detectedAt = performance.now(); }
   consume(): boolean {
@@ -45,7 +67,7 @@ export class GameInput {
     if (this.mode === 'keyboard') return ((this.right ? 1 : 0) - (this.left ? 1 : 0)) * LIMIT;
     return Math.max(-1, Math.min(1, [...this.pointerDirections.values()].reduce((a, b) => a + b, 0))) * LIMIT;
   }
-  clear(): void { this.pending = false; this.held.clear(); this.keys(); this.pointerDirections.clear(); this.sensor.reset(); }
+  clear(): void { this.pending = false; this.specialPending = false; this.specialPointer = null; this.held.clear(); this.keys(); this.pointerDirections.clear(); this.sensor.reset(); }
   setEnabled(enabled: boolean): void { if (this.enabled !== enabled) this.clear(); this.enabled = enabled; }
   resetMetrics(): void { this.measured = emptyMetrics(); }
   metrics(): SensorMetrics & { threshold: number } { return { ...this.measured, threshold: this.sensor.attackThreshold }; }

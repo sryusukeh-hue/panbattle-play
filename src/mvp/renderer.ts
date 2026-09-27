@@ -4,13 +4,24 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { BREADS, BREAD_IDS, clamp, type BreadId } from './config';
 import { phase, pose, type BattleView, type BattleEvent, type Fighter, type Side } from './battle';
 import { BattleFeedback, ReplayBuffer, damageStage, DAMAGE_DENT, deformVertex, VISUAL_LIMITS, type BattleSound } from './feedback';
+import { SPECIALS, motionTick } from '../shared/specials';
 
 interface Model { mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>; positions: Float32Array; normals: Float32Array; colors: Float32Array }
 interface Actor extends Model { stage: number; displayStage: number; dents: THREE.Vector3[]; wornPositions: Float32Array; wornNormals: Float32Array }
-interface ActorFrame { position: THREE.Vector3Tuple; rotation: THREE.Vector3Tuple; height: number; bend: number; direction: number[]; impact: number; hit: number; stage: number; positions: Float32Array; normals: Float32Array }
-export type StanceCue = 'ready' | 'locked' | 'recovery' | 'counter';
+interface ActorFrame { position: THREE.Vector3Tuple; rotation: THREE.Vector3Tuple; height: number; bend: number; direction: number[]; impact: number; hit: number; stage: number; positions: Float32Array; normals: Float32Array;
+  // Special moves: root scale and a golden wind-up glow (replayed with the pose).
+  scale: THREE.Vector3Tuple; glow: number; glowColor: string }
+export type StanceCue = 'ready' | 'locked' | 'recovery' | 'counter' | 'charged';
 interface Crumb { mesh: THREE.Mesh; vx: number; vy: number; vz: number; life: number; rests: boolean }
-interface Accent { mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>; life: number; duration: number }
+interface Accent { mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>; life: number; duration: number; grow?: number; rise?: number; peak?: number }
+type Mark = THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+const sideSign = (side: Side): number => side === 'player' ? 1 : -1;
+// Half-width of the lane a special move sweeps at the defender's line, from the move's attack ellipse (see specialTouching).
+export function dangerHalfWidth(attacker: BreadId, defender: BreadId): number {
+  const spec = SPECIALS[attacker], travel = Math.max(...spec.keys.map(k => k.at[2])), gap = Math.abs(2.4 - travel);
+  const reach = spec.rz + BREADS[defender].depth, t = Math.min(1, gap / reach);
+  return (spec.rx + BREADS[defender].width) * Math.sqrt(1 - t * t);
+}
 export function damageGeometry(geometry: THREE.BufferGeometry, positions: Float32Array, normals: Float32Array, colors: Float32Array, stage: number, dents: readonly THREE.Vector3[]): void {
   const pos = geometry.attributes.position!, color = geometry.attributes.color!;
   for (let i = 0; i < pos.count; i++) {
@@ -47,6 +58,12 @@ export class TableRenderer {
   private envMap: THREE.Texture; private shadowFrame = 0;
   // Player-state ring under the player's bread: ready / locked / recovering / counter chance.
   private stance: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
+  // Table telegraphs for a special move, one reusable set per side: toast square, baguette lane, three crescents.
+  private marks: Record<Side, { shokupan: Mark[]; francepan: Mark[]; croissant: Mark[] }>;
+  private focus = 0; private charging = false;
+  // Special stages whose strike visual was shown, per side (attack id + stage mask): each plays once, hit or miss,
+  // even when a slow frame skips a whole stage window, and a pause never replays it.
+  private flashed: Partial<Record<Side, { id: number; mask: number }>> = {};
   constructor(private canvas: HTMLCanvasElement, fail: (message: string) => void,
     private playSound: (sound: BattleSound, delay?: number, bread?: BreadId) => void = () => {}, private stopSound: () => void = () => {}) {
     this.reducedMotion.addEventListener('change', this.motionChanged);
@@ -74,9 +91,23 @@ export class TableRenderer {
     this.marker.rotation.x = -Math.PI / 2; this.marker.position.y = .018; this.scene.add(this.marker);
     this.stance = new THREE.Mesh(new THREE.RingGeometry(.44, .52, 48), new THREE.MeshBasicMaterial({ color: '#6f9a64', transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide }));
     this.stance.rotation.x = -Math.PI / 2; this.stance.position.y = .016; this.stance.visible = false; this.stance.userData.added = true; this.scene.add(this.stance);
+    this.marks = { player: this.markSet(), cpu: this.markSet() };
     this.resize = new ResizeObserver(() => this.fit()); this.resize.observe(canvas); this.fit();
     canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); this.lost = true; fail('3D描画が中断しました。再読み込みして再開してください。'); });
     canvas.addEventListener('webglcontextrestored', () => { fail('3D描画が復帰しました。再読み込みしてパンを読み直してください。'); });
+  }
+  private markSet(): { shokupan: Mark[]; francepan: Mark[]; croissant: Mark[] } {
+    const mark = (geometry: THREE.BufferGeometry): Mark => {
+      const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide }));
+      mesh.visible = false; mesh.renderOrder = 2; mesh.userData.added = true; this.scene.add(mesh); return mesh;
+    };
+    // Unit shapes flat on the cloth; per-frame scale fits them to the computed danger lane.
+    const square = new THREE.RingGeometry(.84, 1, 4, 1).rotateZ(Math.PI / 4).rotateX(-Math.PI / 2).scale(Math.SQRT2, 1, Math.SQRT2 / 2);
+    const fill = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+    const lane = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+    const tip = new THREE.CircleGeometry(.5, 3).rotateZ(Math.PI / 2).rotateX(-Math.PI / 2);
+    const crescent = (): THREE.BufferGeometry => new THREE.RingGeometry(.72, 1, 24, 1, Math.PI * .12, Math.PI * .76).rotateX(-Math.PI / 2);
+    return { shokupan: [mark(square), mark(fill)], francepan: [mark(lane), mark(lane.clone()), mark(tip)], croissant: [mark(crescent()), mark(crescent()), mark(crescent())] };
   }
   private table(): void {
     const textureCanvas = document.createElement('canvas'); textureCanvas.width = 256; textureCanvas.height = 256;
@@ -192,10 +223,20 @@ export class TableRenderer {
     this.ids = ids;
   }
   private actor(f: Fighter, side: Side, time: number): ActorFrame {
-    const m = this.actors[side]!, p = pose(f, side), b = BREADS[f.bread];
-    m.mesh.position.set(p.x, p.y + Math.sin(time * 2.2 + (side === 'cpu' ? 1 : 0)) * .025, p.z);
-    m.mesh.rotation.set(p.lean + Math.sin(f.hit * 75) * f.hit * .12, side === 'player' ? Math.PI + .12 : -.08, Math.sin(f.hit * 55) * f.hit * .1);
-    if (side === 'cpu' && phase(f) === 'windup' && !this.reducedMotion.matches) m.mesh.rotation.x -= .06 * Math.sin(Math.PI * f.attack!.age / f.attack!.windup);
+    // The result screen shows the breads at rest, not frozen mid-move.
+    if (this.ending && (f.attack || f.recoil > 0 || f.hit > 0)) f = { ...f, attack: null, recoil: 0, hit: 0 };
+    const m = this.actors[side]!, p = pose(f, side), b = BREADS[f.bread], sp = p.special, calm = this.reducedMotion.matches;
+    // Special moves drive the whole root; reduced motion keeps the XZ path and hit timing but drops the jump, growth and spin.
+    const lift = sp ? calm ? 0 : p.y - 1.43 : Math.sin(time * 2.2 + (side === 'cpu' ? 1 : 0)) * .025;
+    m.mesh.position.set(p.x, 1.43 + lift, p.z);
+    m.mesh.rotation.set(p.lean + Math.sin(f.hit * 75) * f.hit * .12, (side === 'player' ? Math.PI + .12 : -.08) + (sp ? sideSign(side) * sp.yaw : 0),
+      Math.sin(f.hit * 55) * f.hit * .1 + (sp && !calm ? sideSign(side) * sp.roll : 0));
+    if (side === 'cpu' && phase(f) === 'windup' && !f.attack!.special && !calm) m.mesh.rotation.x -= .06 * Math.sin(Math.PI * f.attack!.age / f.attack!.windup);
+    const scale: THREE.Vector3Tuple = sp && !calm ? [sp.scale[0], sp.scale[1], sp.scale[2]] : [1, 1, 1];
+    // Golden glow builds through the wind-up, flashes on the strike and fades out in recovery.
+    const spec = SPECIALS[f.bread], a = f.attack, charge = side === 'cpu' && this.charging && !this.ending;
+    const glow = charge ? .45 + (calm ? 0 : .3 * Math.sin(time * 18)) : !a?.special ? 0 : phase(f) === 'windup' ? .35 + .45 * clamp(a.age / a.windup, 0, 1) + (calm ? 0 : .12 * Math.sin(time * 40))
+      : phase(f) === 'active' ? 1 : Math.max(0, .6 * (1 - (a.age - a.windup - spec.active) / a.recovery * 2.5));
     if (this.ending) {
       const t = (performance.now() - this.ending.start) / 1000, calm = this.reducedMotion.matches;
       if (this.ending.winner === side) {
@@ -220,12 +261,12 @@ export class TableRenderer {
     // Visual deformation is <= 3 cm; collision stays tied to the same controlled root pose.
     const bend = Math.sin(Math.max(0, p.progress) * Math.PI) * .03 + Math.sin(f.hit * 60) * f.hit * .025;
     const frame: ActorFrame = { position: m.mesh.position.toArray(), rotation: [m.mesh.rotation.x, m.mesh.rotation.y, m.mesh.rotation.z], height: b.height,
-      bend, direction, impact, hit: f.hit, stage, positions: m.wornPositions, normals: m.wornNormals };
+      bend, direction, impact, hit: f.hit, stage, positions: m.wornPositions, normals: m.wornNormals, scale, glow, glowColor: charge ? '#ff5a36' : spec.color };
     this.drawActor(side, frame); return frame;
   }
   private drawActor(side: Side, frame: ActorFrame): void {
     const m = this.actors[side]!, { bend, direction, impact, height } = frame;
-    m.mesh.position.fromArray(frame.position); m.mesh.rotation.set(...frame.rotation);
+    m.mesh.position.fromArray(frame.position); m.mesh.rotation.set(...frame.rotation); m.mesh.scale.set(...frame.scale);
     const pos = m.mesh.geometry.attributes.position!, normal = m.mesh.geometry.attributes.normal!;
     if (m.displayStage !== frame.stage) {
       const color = m.mesh.geometry.attributes.color!;
@@ -243,7 +284,8 @@ export class TableRenderer {
       const len = Math.hypot(nx, ny, nz); normal.setXYZ(i, nx / len, ny / len, nz / len);
     }
     pos.needsUpdate = true; normal.needsUpdate = true;
-    m.mesh.material.emissive.set(frame.hit > 0 ? '#d95d27' : '#000000'); m.mesh.material.emissiveIntensity = frame.hit * 1.5;
+    if (frame.hit > 0) { m.mesh.material.emissive.set('#d95d27'); m.mesh.material.emissiveIntensity = frame.hit * 1.5; }
+    else { m.mesh.material.emissive.set(frame.glow > 0 ? frame.glowColor : '#000000'); m.mesh.material.emissiveIntensity = frame.glow * .8; }
     const shadow = this.shadows[side === 'player' ? 0 : 1]!; shadow.position.x = frame.position[0]; shadow.position.z = frame.position[2];
   }
   effect(event: BattleEvent): void {
@@ -253,6 +295,8 @@ export class TableRenderer {
     if (event.kind === 'hit' || event.kind === 'clash') {
       for (const side of ['player', 'cpu'] as const) if (event.kind === 'clash' || side !== event.side) this.contacts[side] = new THREE.Vector3(event.x, 1.43, event.z);
     }
+    if (event.kind === 'special-hit') this.contacts[event.side === 'player' ? 'cpu' : 'player'] = new THREE.Vector3(event.x, 1.43, event.z);
+    if (event.kind === 'special' || event.kind === 'special-hit' || (event.kind === 'miss' && event.special)) { this.specialAccent(event, battle); return; }
     if (this.reducedMotion.matches) return;
     if (event.kind === 'dodge' || event.kind === 'counter') {
       if (event.kind === 'counter') this.zoom = .24;
@@ -263,29 +307,72 @@ export class TableRenderer {
       this.scene.add(mesh); this.accents.push({ mesh, life: duration, duration });
     }
     if (event.kind !== 'hit' && event.kind !== 'clash') return;
-    this.shake = .14;
+    this.shake = Math.max(this.shake, .14);
     for (const side of ['player', 'cpu'] as const) {
       const own = pose(battle[side], side), other = pose(battle[side === 'player' ? 'cpu' : 'player'], side === 'player' ? 'cpu' : 'player');
       this.impacts[side] = { life: .18, direction: new THREE.Vector3(other.x - own.x, 0, other.z - own.z).normalize() };
     }
-    for (let i = 0; i < 12; i++) {
-      const side = event.kind === 'clash' ? i % 2 ? 'player' : 'cpu' : event.side === 'player' ? 'cpu' : 'player';
-      const bread = battle[side].bread, size = .03 + i % 3 * .012;
-      const geometry = bread === 'shokupan' ? new THREE.BoxGeometry(size, size, size * .7) : bread === 'francepan' ? new THREE.TetrahedronGeometry(size) : new THREE.BoxGeometry(size * 1.6, .007, size * .8);
-      const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: bread === 'shokupan' ? '#fff5dc' : bread === 'francepan' ? '#995020' : '#df9e48' }));
-      mesh.position.set(event.x, 1.45, event.z); this.scene.add(mesh);
-      const rests = i % 3 === 0;
-      this.crumbs.push({ mesh, vx: Math.cos(i * 2.4) * 1.3, vy: 1 + i % 4 * .2, vz: Math.sin(i * 2.4), life: rests ? VISUAL_LIMITS.crumbSeconds : .55, rests });
-      if (this.crumbs.length > VISUAL_LIMITS.crumbs) this.removeCrumb(0);
+    for (let i = 0; i < 12; i++) this.crumb(battle[event.kind === 'clash' ? i % 2 ? 'player' : 'cpu' : event.side === 'player' ? 'cpu' : 'player'].bread, event.x, 1.45, event.z, i);
+  }
+  // One crumb of the given bread's material; `power` scales the burst for special moves.
+  private crumb(bread: BreadId, x: number, y: number, z: number, i: number, power = 1): void {
+    const size = (.03 + i % 3 * .012) * (power > 1 ? 1.25 : 1);
+    const geometry = bread === 'shokupan' ? new THREE.BoxGeometry(size, size, size * .7) : bread === 'francepan' ? new THREE.TetrahedronGeometry(size) : new THREE.BoxGeometry(size * 1.6, .007, size * .8);
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: bread === 'shokupan' ? '#fff5dc' : bread === 'francepan' ? '#995020' : '#df9e48' }));
+    mesh.position.set(x, y, z); this.scene.add(mesh);
+    const rests = i % 3 === 0;
+    this.crumbs.push({ mesh, vx: Math.cos(i * 2.4) * 1.3 * power, vy: (1 + i % 4 * .2) * Math.sqrt(power), vz: Math.sin(i * 2.4) * power, life: rests ? VISUAL_LIMITS.crumbSeconds : .55 + .15 * (power - 1), rests });
+    if (this.crumbs.length > VISUAL_LIMITS.crumbs) this.removeCrumb(0);
+  }
+  private flash(geometry: THREE.BufferGeometry, color: string, position: THREE.Vector3, duration: number, options: { face?: boolean; grow?: number; rise?: number; peak?: number } = {}): void {
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: options.peak ?? .9, side: THREE.DoubleSide, depthWrite: false }));
+    mesh.name = 'special'; mesh.position.copy(position); mesh.renderOrder = 3;
+    if (options.face) mesh.quaternion.copy(this.camera.quaternion);
+    this.scene.add(mesh); this.accents.push({ mesh, life: duration, duration, grow: options.grow ?? .5, rise: options.rise ?? 0, peak: options.peak ?? .9 });
+  }
+  // Activation aura, hit bursts and whiff wisps for special moves. Reduced motion keeps only static, short shapes.
+  private specialAccent(event: BattleEvent, battle: BattleView): void {
+    const calm = this.reducedMotion.matches, attacker = event.side, victim: Side = attacker === 'player' ? 'cpu' : 'player';
+    const bread = battle[attacker].bread, spec = SPECIALS[bread], point = new THREE.Vector3(event.x, 1.45, event.z);
+    if (event.kind === 'special') {
+      const base = pose(battle[attacker], attacker);
+      for (let i = 0; i < (calm ? 1 : 3); i++)
+        this.flash(new THREE.RingGeometry(.55, .64, 40).rotateX(-Math.PI / 2), spec.color, new THREE.Vector3(base.x, .05 + i * .12, base.z), .7 + i * .15, { grow: calm ? 0 : 1.6, rise: calm ? 0 : 1.1 });
+      return;
     }
+    if (event.kind === 'miss') {
+      this.flash(new THREE.RingGeometry(.3, .36, 32).rotateX(-Math.PI / 2), '#f1e6c8', new THREE.Vector3(event.x, .05, sideSign(attacker) * -.3), .35, { grow: calm ? 0 : 1.2, peak: .6 });
+      if (!calm && bread === 'shokupan') for (let i = 0; i < 4; i++) this.crumb(bread, event.x, .3, sideSign(attacker) * -.4, i);
+      return;
+    }
+    const stage = event.stage ?? 0, final = stage === spec.stages.length - 1;
+    this.impacts[victim] = { life: .18, direction: new THREE.Vector3(0, 0, -sideSign(attacker)) };
+    this.flash(new THREE.RingGeometry(final ? .18 : .1, final ? .5 : .28, 10), '#ffffff', point, final ? .24 : .14, { face: true, grow: calm ? 0 : final ? 2.8 : 1.4 });
+    if (calm) return;
+    const count = bread === 'shokupan' ? 24 : bread === 'francepan' ? 18 : final ? 12 : 4;
+    for (let i = 0; i < count; i++) this.crumb(battle[victim].bread, event.x, 1.45, event.z, i, final ? 1.7 : 1.1);
+    if (final) { this.shake = Math.max(this.shake, bread === 'croissant' ? .1 : .14); this.zoom = .24; }
   }
   private removeCrumb(index: number): void {
     const c = this.crumbs[index]!; this.scene.remove(c.mesh); c.mesh.geometry.dispose(); (c.mesh.material as THREE.Material).dispose(); this.crumbs.splice(index, 1);
   }
+  // The move's signature shape at the moment each stage strikes: toast slam wave, baguette light line, crescent arcs.
+  private stageFlash(battle: BattleView, side: Side, stage: number): void {
+    const f = battle[side], spec = SPECIALS[f.bread], p = pose(f, side), calm = this.reducedMotion.matches, final = stage === spec.stages.length - 1;
+    if (f.bread === 'shokupan') {
+      this.flash(new THREE.RingGeometry(.7, .86, 4).rotateZ(Math.PI / 4).rotateX(-Math.PI / 2), '#fff4d6', new THREE.Vector3(p.x, .06, p.z), .45, { grow: calm ? 0 : 3.2 });
+      this.flash(new THREE.RingGeometry(.4, .5, 4).rotateZ(Math.PI / 4), spec.color, new THREE.Vector3(p.x, p.y, p.z), .3, { face: true, grow: calm ? 0 : 2.4 });
+    } else if (f.bread === 'francepan') {
+      this.flash(new THREE.PlaneGeometry(.12, 2.6).rotateX(-Math.PI / 2), '#e8f6ff', new THREE.Vector3(p.x, .9, p.z + sideSign(side) * .9), .25, { grow: calm ? 0 : .6 });
+    } else {
+      this.flash(new THREE.RingGeometry(.5, .62, 28, 1, Math.PI * .1, Math.PI * .8).rotateZ(stage * 1.1), final ? spec.color : '#fff1c2', new THREE.Vector3(p.x, p.y, p.z), final ? .4 : .22, { face: true, grow: calm ? 0 : final ? 2.6 : 1.2 });
+    }
+  }
   private cameraEffect(dt: number): void {
     this.shake = Math.max(0, this.shake - dt); this.zoom = Math.max(0, this.zoom - dt);
-    const shake = this.reducedMotion.matches ? 0 : VISUAL_LIMITS.shake * this.shake / .14 * Math.sin(this.shake * 140);
-    const zoom = this.reducedMotion.matches ? 0 : VISUAL_LIMITS.zoom * Math.sin(Math.PI * this.zoom / .24);
+    const shake = this.reducedMotion.matches ? 0 : VISUAL_LIMITS.shake * Math.min(1, this.shake / .14) * Math.sin(this.shake * 140);
+    // The cut-in leans the camera in slightly; combined with hit zoom it never exceeds the shared zoom limit.
+    const zoom = this.reducedMotion.matches ? 0 : Math.min(VISUAL_LIMITS.zoom, VISUAL_LIMITS.zoom * Math.sin(Math.PI * this.zoom / .24) + VISUAL_LIMITS.zoom * .8 * this.focus);
     // Result screen: tilt down so the celebrating breads sit above the result sheet.
     const tilt = !this.ending ? 0 : this.reducedMotion.matches ? 1 : 1 - (1 - Math.min(1, (performance.now() - this.ending.start) / 900)) ** 3;
     this.camera.position.set(.9 + shake, 5.8, 7.1 - zoom); this.camera.lookAt(0, 1.05 - 5.1 * tilt, -.15);
@@ -307,12 +394,13 @@ export class TableRenderer {
     for (const effect of [...this.crumbs, ...this.accents]) {
       this.scene.remove(effect.mesh); effect.mesh.geometry.dispose(); (effect.mesh.material as THREE.Material).dispose();
     }
-    this.crumbs = []; this.accents = []; this.previous = {}; this.impacts = {}; this.shake = this.zoom = 0; this.cameraEffect(0); this.marker.visible = false;
+    this.crumbs = []; this.accents = []; this.previous = {}; this.impacts = {}; this.shake = this.zoom = this.focus = 0; this.cameraEffect(0); this.marker.visible = false;
+    for (const set of Object.values(this.marks ?? {})) for (const mark of Object.values(set).flat()) mark.visible = false;
   }
   resetEffects(newMatch = false): void {
     this.clearEffects(); this.feedback.reset(newMatch); this.stopSound();
     if (newMatch) {
-      this.contacts = {}; this.replay.reset();
+      this.contacts = {}; this.flashed = {}; this.replay.reset();
       for (const m of Object.values(this.actors)) { damageGeometry(m.mesh.geometry, m.positions, m.normals, m.colors, 0, []); m.stage = m.displayStage = 0; m.dents = []; m.wornPositions = m.positions; m.wornNormals = m.normals; }
     }
   }
@@ -324,26 +412,37 @@ export class TableRenderer {
     this.renderer.shadowMap.needsUpdate = true; this.renderer.render(this.scene, this.camera); return frame.done;
   }
   // timeScale slows effect animation only (finish slow-motion); frame metrics keep the real dt.
-  render(battle: BattleView, time: number, frameDt: number, active: boolean, local?: { remaining?: number; cue?: StanceCue }, timeScale = 1): void {
+  // local.frozen: the special cut-in is playing; nothing is recorded for the replay and effects drift in slow motion.
+  // local.charging: the CPU's once-per-match meter charge is running (it glows).
+  render(battle: BattleView, time: number, frameDt: number, active: boolean, local?: { remaining?: number; cue?: StanceCue; frozen?: boolean; charging?: boolean }, timeScale = 1): void {
     if (this.lost) return;
-    const dt = frameDt * timeScale;
+    const dt = frameDt * timeScale * (local?.frozen ? .15 : 1);
+    this.focus = clamp(this.focus + (local?.frozen ? 1 : -1) * frameDt * 6, 0, 1); this.charging = !!local?.charging;
     const feedback = this.feedback.update(battle, active, local?.remaining);
     if (!active) this.resetEffects();
     else {
       for (const event of feedback.events) this.accent(event, battle);
       const soundEvent = feedback.events.find(event => event.kind === feedback.sound);
-      if (feedback.sound) this.playSound(feedback.sound, 0, battle[soundEvent?.side ?? 'player'].bread);
+      if (feedback.sound) this.playSound(feedback.sound, 0, battle[feedback.soundSide ?? soundEvent?.side ?? 'player'].bread);
       if (feedback.alert) this.playSound('danger', .20);
     }
     this.choose(battle);
     const player = this.actor(battle.player, 'player', time), cpu = this.actor(battle.cpu, 'cpu', time);
-    if (active && local) this.replay.record(dt, { player, cpu });
+    if (active && local && !local.frozen) this.replay.record(dt, { player, cpu });
     this.cameraEffect(dt);
     for (const impact of Object.values(this.impacts)) impact.life = Math.max(0, impact.life - dt);
     this.updateStance(battle, active ? local?.cue : undefined, time);
     const a = battle.cpu.attack;
-    this.marker.visible = active && phase(battle.cpu) === 'windup';
-    if (a) {
+    this.marker.visible = active && phase(battle.cpu) === 'windup' && !a?.special;
+    for (const side of ['player', 'cpu'] as const) {
+      this.updateMarks(battle, side, active, time);
+      const f = battle[side], attack = f.attack;
+      if (!active || !attack?.special || phase(f) === 'windup' || this.ending) continue;
+      const tick = motionTick(f.bread, attack.age, attack.special.extra), seen = this.flashed[side]?.id === attack.id ? this.flashed[side]! : { id: attack.id, mask: 0 };
+      SPECIALS[f.bread].stages.forEach((stage, i) => { if (tick >= stage.from && !(seen.mask & 1 << i)) { seen.mask |= 1 << i; this.stageFlash(battle, side, i); } });
+      this.flashed[side] = seen;
+    }
+    if (a && !a.special) {
       const progress = clamp(a.age / a.windup, 0, 1);
       this.marker.position.set(a.aim, .025, 1.2);
       this.marker.scale.setScalar(this.reducedMotion.matches ? 1.4 : 1.65 - .45 * progress);
@@ -354,8 +453,9 @@ export class TableRenderer {
     if (active) for (const side of ['player', 'cpu'] as const) this.trail(battle[side], side);
     for (let i = this.accents.length - 1; i >= 0; i--) {
       const c = this.accents[i]!; c.life -= dt;
-      c.mesh.material.opacity = (c.mesh.name === 'trail' ? .35 : .9) * Math.max(0, c.life / c.duration);
-      if (c.mesh.name !== 'trail') c.mesh.scale.setScalar(1 + .5 * (1 - c.life / c.duration));
+      c.mesh.material.opacity = (c.mesh.name === 'trail' ? .35 : c.peak ?? .9) * Math.max(0, c.life / c.duration);
+      if (c.mesh.name !== 'trail') c.mesh.scale.setScalar(1 + (c.grow ?? .5) * (1 - c.life / c.duration));
+      if (c.rise) c.mesh.position.y += c.rise * dt;
       if (c.life <= 0) { this.scene.remove(c.mesh); c.mesh.geometry.dispose(); c.mesh.material.dispose(); this.accents.splice(i, 1); }
     }
     for (let i = this.crumbs.length - 1; i >= 0; i--) {
@@ -369,16 +469,54 @@ export class TableRenderer {
     this.renderer.render(this.scene, this.camera);
     if (active && frameDt > 0 && timeScale === 1) { this.frames.push(frameDt * 1000); if (this.frames.length > 12000) this.frames.shift(); }
   }
+  // Telegraphs the locked lane from activation until the last stage resolves. Red for the CPU (dodge!), move colour for the player.
+  private updateMarks(battle: BattleView, side: Side, active: boolean, time: number): void {
+    const f = battle[side], a = f.attack, set = this.marks[side], p = phase(f), calm = this.reducedMotion.matches;
+    for (const [bread, meshes] of Object.entries(set)) {
+      const live = active && !!a?.special && f.bread === bread && (p === 'windup' || p === 'active') && !this.ending;
+      meshes.forEach(mesh => { mesh.visible = live; });
+      if (!live) continue;
+      const other = battle[side === 'player' ? 'cpu' : 'player'], sign = sideSign(side), spec = SPECIALS[f.bread];
+      const half = dangerHalfWidth(f.bread, other.bread), progress = p === 'active' ? 1 : clamp(a!.age / a!.windup, 0, 1);
+      // Outlines always show the final danger lane (for a defender standing still); only the fill tracks the wind-up.
+      const pulse = calm ? 1 : .8 + .2 * Math.sin(time * 30);
+      const color = side === 'cpu' ? progress > .7 ? '#d42a14' : '#ff4a26' : spec.color, opacity = Math.min(1, (side === 'cpu' ? .5 : .3) + .55 * progress) * pulse;
+      const aim = a!.aim, target = -sign * 1.2;
+      meshes.forEach(mesh => { mesh.material.color.set(color); mesh.material.opacity = opacity; });
+      if (f.bread === 'shokupan') {
+        const [frame, fill] = meshes as [Mark, Mark];
+        frame.position.set(aim, .024, target); frame.scale.set(half, 1, spec.rz * 2);
+        fill.position.set(aim, .022, target); fill.scale.set(half * 2 * progress, 1, spec.rz * 2 * progress); fill.material.opacity = opacity * .35;
+      } else if (f.bread === 'francepan') {
+        const [lane, fill, tip] = meshes as [Mark, Mark, Mark], near = sign * .9, length = Math.abs(target - near) + .3;
+        lane.position.set(aim, .022, (near + target) / 2); lane.scale.set(half * 2, 1, length); lane.material.opacity = opacity * .3;
+        // The bright core grows from the baguette toward the target as the thrust nears.
+        fill.position.set(aim, .024, near - sign * length * progress / 2); fill.scale.set(half * 2, 1, Math.max(.01, length * progress)); fill.material.opacity = opacity * .55;
+        tip.position.set(aim, .026, target - sign * .1); tip.scale.setScalar(.55); tip.rotation.y = side === 'player' ? 0 : Math.PI;
+      } else {
+        // One crescent per stage; each disappears once its hit window has passed.
+        const tick = Math.round(a!.age * 120), extra = Math.round(a!.special!.extra * 120);
+        meshes.forEach((mesh, i) => {
+          mesh.visible = tick < spec.stages[i]!.to + extra;
+          mesh.position.set(aim, .024 + i * .002, target + sign * (i * .22 - .1)); mesh.scale.set(half, 1, half * .8);
+          mesh.rotation.y = side === 'player' ? 0 : Math.PI;
+        });
+      }
+    }
+  }
   private updateStance(battle: BattleView, cue: StanceCue | undefined, time: number): void {
     this.stance.visible = !!cue && !this.ending;
     if (!cue) return;
     const p = pose(battle.player, 'player'), m = this.stance.material, pulse = this.reducedMotion.matches ? 1 : .5 + .5 * Math.sin(time * 14);
     this.stance.position.x = p.x; this.stance.position.z = p.z;
     this.stance.scale.set(.75 + BREADS[battle.player.bread].width * .8, .75 + BREADS[battle.player.bread].width * .8, 1);
-    const [color, opacity, grow] = cue === 'counter' ? ['#f2b53a', .55 + .4 * pulse, .12 * pulse] : cue === 'locked' ? ['#8a8575', .32, 0] : cue === 'recovery' ? ['#b7a98a', .28, 0] : ['#6f9a64', .5, 0];
+    const [color, opacity, grow] = cue === 'charged' ? [`hsl(${this.reducedMotion.matches ? 42 : 30 + 20 * pulse}, 95%, 58%)`, .6 + .35 * pulse, .08 * pulse] : cue === 'counter' ? ['#f2b53a', .55 + .4 * pulse, .12 * pulse] : cue === 'locked' ? ['#8a8575', .32, 0] : cue === 'recovery' ? ['#b7a98a', .28, 0] : ['#6f9a64', .5, 0];
     m.color.set(color); m.opacity = opacity; this.stance.scale.multiplyScalar(1 + grow);
   }
-  setEnding(winner: Side | 'draw' | null): void { this.ending = winner === null ? null : { winner, start: performance.now() }; }
+  setEnding(winner: Side | 'draw' | null): void {
+    this.ending = winner === null ? null : { winner, start: performance.now() };
+    if (winner !== null) for (const set of Object.values(this.marks)) for (const mark of Object.values(set).flat()) mark.visible = false;
+  }
   // Screen position (CSS px within the canvas) of a point above the given side's bread.
   project(battle: BattleView, side: Side, lift = .75): { x: number; y: number } {
     const p = pose(battle[side], side), v = new THREE.Vector3(p.x, p.y + lift, p.z).project(this.camera);

@@ -106,3 +106,37 @@ describe('sensor permission and actual input reception', () => {
     expect(input.sensor.calibrate(performance.now())).toBe(true);
   });
 });
+
+describe('special button and X key', () => {
+  function key(type: string, code: string, repeat = false): void {
+    const event = new Event(type); Object.defineProperties(event, { code: { value: code }, repeat: { value: repeat }, target: { value: null } }); events.dispatchEvent(event);
+  }
+  function button(): HTMLElement {
+    const target = new EventTarget() as HTMLElement;
+    Object.assign(target, { getBoundingClientRect: () => ({ left: 0, right: 100, top: 0, bottom: 50 }), setPointerCapture: () => {}, blur: vi.fn() });
+    input.bindSpecial(target); return target;
+  }
+  function pointer(target: EventTarget, type: string, x = 50, y = 25, pointerId = 1): void {
+    const event = new Event(type, { cancelable: true }); Object.defineProperties(event, { pointerId: { value: pointerId }, clientX: { value: x }, clientY: { value: y } }); target.dispatchEvent(event);
+  }
+  it('one tap that starts and ends on the button fires once; sliding off, cancel or a disabled input never fires', () => {
+    const special = button(); input.setEnabled(true);
+    pointer(special, 'pointerdown'); pointer(special, 'pointerup'); expect(input.consumeSpecial()).toBe(true); expect(input.consumeSpecial()).toBe(false);
+    pointer(special, 'pointerdown'); pointer(special, 'pointerup', 50, -80); expect(input.consumeSpecial()).toBe(false);
+    pointer(special, 'pointerdown'); pointer(special, 'pointercancel'); pointer(special, 'pointerup'); expect(input.consumeSpecial()).toBe(false);
+    pointer(special, 'pointerdown'); pointer(special, 'pointerup', 50, 25, 2); expect(input.consumeSpecial()).toBe(false);
+    input.setEnabled(false); pointer(special, 'pointerdown'); pointer(special, 'pointerup'); expect(input.consumeSpecial()).toBe(false);
+  });
+  it('keyboard activation of the focused button fires once and gives focus back to the game', () => {
+    const special = button(); input.setEnabled(true);
+    const click = new Event('click'); Object.defineProperty(click, 'detail', { value: 0 }); special.dispatchEvent(click);
+    expect(input.consumeSpecial()).toBe(true); expect(special.blur).toHaveBeenCalled();
+  });
+  it('X fires once per press in keyboard mode, ignores key repeat, and clear() drops a pending request', () => {
+    vi.stubGlobal('HTMLElement', class {}); input.mode = 'keyboard'; input.setEnabled(true);
+    key('keydown', 'KeyX'); key('keydown', 'KeyX', true); expect(input.consumeSpecial()).toBe(true);
+    key('keydown', 'KeyX'); expect(input.consumeSpecial()).toBe(false); // still held
+    key('keyup', 'KeyX'); key('keydown', 'KeyX'); input.clear(); expect(input.consumeSpecial()).toBe(false);
+    input.mode = 'touch'; key('keyup', 'KeyX'); key('keydown', 'KeyX'); expect(input.consumeSpecial()).toBe(false);
+  });
+});

@@ -1,4 +1,5 @@
 import { phase, type BattleEvent, type BattleView, type Side } from './battle';
+import { SPECIALS, METER_MAX } from '../shared/specials';
 
 export const VISUAL_LIMITS = { deformation: .03, squash: .018, shake: .012, zoom: .09, crumbs: 48, crumbSeconds: 3.5 } as const;
 export const DAMAGE_DENT = .012;
@@ -14,8 +15,10 @@ export function deformVertex(x: number, y: number, z: number, bend: number, dire
   output[0] = x + dx * scale; output[1] = y + dy * scale; output[2] = z + dz * scale; return output;
 }
 
-export type BattleSound = 'telegraph' | 'swing' | 'hit' | 'clash' | 'dodge' | 'counter' | 'danger' | 'heartbeat';
-const priority: Record<BattleSound, number> = { heartbeat: -1, danger: 0, telegraph: 1, swing: 2, dodge: 3, hit: 4, clash: 5, counter: 6 };
+export type BattleSound = 'telegraph' | 'swing' | 'hit' | 'clash' | 'dodge' | 'counter' | 'danger' | 'heartbeat'
+  | 'special' | 'special-hit' | 'special-final' | 'special-miss' | 'charged';
+const priority: Record<BattleSound, number> = { heartbeat: -1, danger: 0, telegraph: 1, swing: 2, charged: 3, 'special-miss': 3.5, dodge: 4,
+  'special-hit': 5, hit: 6, clash: 7, counter: 8, special: 9, 'special-final': 10 };
 
 export class ReplayBuffer<T> {
   private frames: ({ time: number; value: T } | undefined)[] = Array(240);
@@ -51,39 +54,51 @@ export class BattleFeedback {
   private pending: BattleEvent[] = [];
   private danger = false;
   private lastSecond = 11;
+  // Player meter seen last frame (undefined until the first view) and a full-meter chime not yet heard.
+  private meter: number | undefined; private charged = false;
   enqueue(event: BattleEvent): void {
     if (this.seen.has(event.id)) return;
     this.seen.add(event.id); this.pending.push(event);
   }
-  update(view: BattleView, active: boolean, remaining?: number): { events: BattleEvent[]; sound: BattleSound | null; alert: boolean } {
-    if (!active) { this.pending = []; return { events: [], sound: null, alert: false }; }
+  // soundSide names the fighter whose bread voices the sound (special-final etc. do not match an event kind).
+  update(view: BattleView, active: boolean, remaining?: number): { events: BattleEvent[]; sound: BattleSound | null; alert: boolean; soundSide?: Side } {
+    if (!active) { this.pending = []; this.charged = false; return { events: [], sound: null, alert: false }; }
     const events = this.pending; this.pending = [];
-    const sounds: BattleSound[] = [];
+    const sounds: [BattleSound, Side][] = [];
     const second = remaining === undefined ? 11 : Math.ceil(remaining);
-    if (second > 0 && second < this.lastSecond && second <= 10) { sounds.push('heartbeat'); this.lastSecond = second; }
+    if (second > 0 && second < this.lastSecond && second <= 10) { sounds.push(['heartbeat', 'player']); this.lastSecond = second; }
     for (const event of events) {
-      if (['hit', 'clash', 'dodge', 'counter'].includes(event.kind)) sounds.push(event.kind as BattleSound);
+      if (['hit', 'clash', 'dodge', 'counter', 'special'].includes(event.kind)) sounds.push([event.kind as BattleSound, event.side]);
+      else if (event.kind === 'special-hit') sounds.push([event.stage === SPECIALS[view[event.side].bread].stages.length - 1 ? 'special-final' : 'special-hit', event.side]);
+      else if (event.kind === 'miss' && event.special) sounds.push(['special-miss', event.side]);
     }
+    // Online views carry no meter. The chime waits for a frame not taken by a louder sound (it usually fills on a hit).
+    const meter = view.player.meter;
+    if (meter === undefined || meter < METER_MAX) this.charged = false;
+    else if (this.meter !== undefined && this.meter < METER_MAX) this.charged = true;
+    this.meter = meter;
+    if (this.charged) sounds.push(['charged', 'player']);
     for (const side of ['player', 'cpu'] as Side[]) {
       const fighter = view[side], attack = fighter.attack;
       if (!attack) continue;
       const key = `${side}/${attack.id}`, current = phase(fighter);
       if (!this.windups.has(key)) {
         this.windups.add(key);
-        if (side === 'cpu' && current === 'windup') sounds.push('telegraph');
+        if (side === 'cpu' && current === 'windup') sounds.push(['telegraph', side]);
       }
-      if (current === 'active' && !this.swings.has(key)) { this.swings.add(key); sounds.push('swing'); }
+      if (current === 'active' && !this.swings.has(key)) { this.swings.add(key); sounds.push(['swing', side]); }
     }
     const danger = view.player.hp > 0 && view.player.hp <= 25;
     const enteredDanger = danger && !this.danger;
-    if (enteredDanger) sounds.push('danger');
+    if (enteredDanger) sounds.push(['danger', 'player']);
     this.danger = danger;
-    const sound = sounds.sort((a, b) => priority[b] - priority[a])[0] ?? null;
-    return { events, sound, alert: enteredDanger && sound !== 'danger' };
+    const [sound, soundSide] = sounds.sort((a, b) => priority[b[0]] - priority[a[0]])[0] ?? [null, undefined];
+    if (sound === 'charged') this.charged = false;
+    return { events, sound, alert: enteredDanger && sound !== 'danger', ...soundSide && { soundSide } };
   }
   reset(newMatch = false): void {
     this.pending = [];
     // Preserve consumed IDs across pause/reconnect; a new match restarts serials.
-    if (newMatch) { this.seen.clear(); this.windups.clear(); this.swings.clear(); this.danger = false; this.lastSecond = 11; }
+    if (newMatch) { this.seen.clear(); this.windups.clear(); this.swings.clear(); this.danger = false; this.lastSecond = 11; this.meter = undefined; this.charged = false; }
   }
 }

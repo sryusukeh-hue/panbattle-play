@@ -1,14 +1,16 @@
-import { BREAD_IDS, RULE, type BreadId, type Mode } from './config';
+import { BREAD_IDS, type BreadId, type Mode } from './config';
+import { SPECIAL_RULE } from '../shared/rules';
 import { DIFFICULTIES, type Battle, type Difficulty, type Metric, type Scores } from './battle';
 export const SAVE_KEY = 'panbattle.3d.v1';
 export interface Saved { version: 1; sound: boolean; sensitivity: number; attackSensitivity: number; tiltSensitivity: number; bread: BreadId; cpu: BreadId; practiced: boolean; best: Record<string, Partial<Scores>>;
   // Optional fields added without a version bump; absent means the pre-existing behaviour.
-  difficulty?: Difficulty; music?: boolean;
+  difficulty?: Difficulty; music?: boolean; practicedSpecial?: boolean;
   // Versioned: the score formula changed on 2026-09-27, so earlier numbers are not comparable.
   bestScoreV2?: Record<string, number> }
 export const defaults = (): Saved => ({ version: 1, sound: false, sensitivity: 1, attackSensitivity: 1, tiltSensitivity: 1, bread: 'shokupan', cpu: 'shokupan', practiced: false, best: {} });
-export const condition = (player: BreadId, cpu: BreadId, mode: Mode, difficulty: Difficulty = 'gentle'): string => `${RULE}/${player}/${cpu}/${difficulty}/${mode}`;
-const KEY = /^table-1\/(shokupan|francepan|croissant)\/(shokupan|francepan|croissant)\/(gentle|normal|hard)\/(sensor|touch|keyboard)$/;
+export const condition = (player: BreadId, cpu: BreadId, mode: Mode, difficulty: Difficulty = 'gentle'): string => `${SPECIAL_RULE}/${player}/${cpu}/${difficulty}/${mode}`;
+// Pre-special table-1 records stay readable and untouched; new matches compare only under SPECIAL_RULE.
+const KEY = /^table-(?:special-)?1\/(shokupan|francepan|croissant)\/(shokupan|francepan|croissant)\/(gentle|normal|hard)\/(sensor|touch|keyboard)$/;
 export const rate = (m: Metric | undefined): number | null => m && m.opportunities > 0 ? m.success / m.opportunities : null;
 function validMetric(m: unknown): m is Metric {
   if (!m || typeof m !== 'object') return false;
@@ -28,6 +30,7 @@ export class SaveStore {
       }
       if (value.difficulty !== undefined && !DIFFICULTIES.includes(value.difficulty)) throw new Error('invalid');
       if (value.music !== undefined && typeof value.music !== 'boolean') throw new Error('invalid');
+      if (value.practicedSpecial !== undefined && typeof value.practicedSpecial !== 'boolean') throw new Error('invalid');
       if (value.bestScoreV2 !== undefined) {
         if (!value.bestScoreV2 || typeof value.bestScoreV2 !== 'object' || Array.isArray(value.bestScoreV2)) throw new Error('invalid');
         for (const [key, score] of Object.entries(value.bestScoreV2)) if (!KEY.test(key) || !Number.isInteger(score) || score < 0 || score > 100) throw new Error('invalid');

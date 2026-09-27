@@ -126,20 +126,29 @@ test('practice teaches attack/dodge/counter, never damages, supports replay and 
   await bootWithClock(page); await select(page, 'キーボード');
   await page.getByRole('button', { name: 'まずは短い練習へ →' }).click(); await page.getByRole('button', { name: '練習をはじめる' }).click();
   await page.keyboard.press('Space');
-  await advanceUntil(page, () => page.locator('#play-tip').evaluate(e => e.textContent!.includes('2 / 3')));
+  await advanceUntil(page, () => page.locator('#play-tip').evaluate(e => e.textContent!.includes('2 / 4')));
   // Wait for the actual CPU anticipation, then use normal keyboard events.
   await advanceUntil(page, () => page.evaluate(() => {
     const attack = window.__panTest.battle.cpu.attack;
     return !!attack && attack.age < .2;
   }));
   await page.keyboard.down('ArrowRight');
-  await advanceUntil(page, () => page.locator('#play-tip').evaluate(e => e.textContent!.includes('3 / 3')));
+  await advanceUntil(page, () => page.locator('#play-tip').evaluate(e => e.textContent!.includes('3 / 4')));
   await page.keyboard.up('ArrowRight'); await page.keyboard.press('Space');
+  // Stage 4: see and dodge the CPU special, then land your own.
+  await advanceUntil(page, () => page.locator('#play-tip').evaluate(e => e.textContent!.includes('4 / 4')));
+  await expect(page.locator('#play-tip')).toContainText('見切ろう');
+  await advanceUntil(page, () => page.evaluate(() => !!window.__panTest.battle.cpu.attack?.special));
+  await page.keyboard.down('ArrowLeft');
+  await advanceUntil(page, () => page.evaluate(() => window.__panTest.battle.specialStep === 'fire'));
+  await page.keyboard.up('ArrowLeft'); await expect(page.locator('#play-tip')).toContainText('ひっさつを当てよう');
+  await page.evaluate(() => { const b = window.__panTest.battle; b.player.x = b.cpu.x; });
+  await page.keyboard.press('KeyX');
   await advanceUntil(page, () => page.getByRole('heading', { name: 'いい構え！' }).isVisible());
   await expect(page.getByRole('heading', { name: 'いい構え！' })).toBeVisible();
   expect((await page.evaluate(() => window.__panDiagnostics())).hp).toEqual([100, 100]);
   expect(await page.evaluate(() => Object.keys(window.__panTest.save.data.best))).toEqual([]);
-  await page.getByRole('button', { name: 'もう一度練習' }).click(); await expect(page.locator('#play-tip')).toContainText('1 / 3');
+  await page.getByRole('button', { name: 'もう一度練習' }).click(); await expect(page.locator('#play-tip')).toContainText('1 / 4');
   await page.getByRole('button', { name: '練習をスキップ' }).click(); await page.clock.runFor(3100);
   await expect(page.locator('#app')).toHaveAttribute('data-screen', 'battle');
 });

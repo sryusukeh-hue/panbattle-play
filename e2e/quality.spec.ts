@@ -165,10 +165,10 @@ test('difficulty, damage numbers, rank and title sound toggle', async ({ page },
   await expect(page.locator('.rank-letter')).toHaveText(/^[SABCD]$/);
   await expect(page.locator('.stat').first()).toContainText('100');
   await expect(page.getByText('つよいCPU · キーボード', { exact: false })).toBeVisible();
-  expect(await page.evaluate(() => Object.keys(window.__panTest.save.data.bestScoreV2 ?? {}))).toEqual(['table-1/shokupan/shokupan/hard/keyboard']);
+  expect(await page.evaluate(() => Object.keys(window.__panTest.save.data.bestScoreV2 ?? {}))).toEqual(['table-special-1/shokupan/shokupan/hard/keyboard']);
   await page.screenshot({ path: info.outputPath('result.png'), fullPage: true });
   await expect(page.locator('.next-tip')).toContainText('反撃');
   await page.getByRole('button', { name: '反撃だけ練習する →' }).click();
   await expect(page.locator('#app')).toHaveAttribute('data-screen', 'practice');
-  await expect(page.locator('#play-tip')).toContainText('3 / 3');
+  await expect(page.locator('#play-tip')).toContainText('3 / 4');
 });
