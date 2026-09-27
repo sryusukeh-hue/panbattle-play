@@ -104,7 +104,10 @@ test('storage failure is visible, settings and result still work', async ({ page
   await boot(page); await page.getByRole('button', { name: '設定', exact: true }).click(); await page.getByLabel('音を鳴らす').check();
   await expect(page.locator('#save-warning')).toContainText('端末に保存できません');
   await page.getByRole('button', { name: '戻る', exact: true }).click(); await select(page); await fight(page);
-  await page.evaluate(() => { window.__panTest.battle.elapsed = 59.99; }); await page.getByRole('button', { name: 'リプレイをスキップ →' }).click(); await expect(page.locator('#app')).toHaveAttribute('data-screen', 'result');
+  await page.evaluate(() => { window.__panTest.battle.elapsed = 59.99; });
+  // The finish and replay screens redraw the skip button and advance on their own; on a slow runner either path may win.
+  const skip = page.getByRole('button', { name: 'リプレイをスキップ →' });
+  await expect.poll(async () => { if (await skip.isVisible()) await skip.click({ timeout: 2000 }).catch(() => {}); return page.locator('#app').getAttribute('data-screen'); }, { timeout: 60000 }).toBe('result');
   await expect(page.getByRole('button', { name: '同じパンで、もう一戦 →' })).toBeVisible();
 });
 for (const width of [360, 390, 430]) test(`three breads and all opponent combinations render without errors at ${width}px`, async ({ page }, testInfo) => {
