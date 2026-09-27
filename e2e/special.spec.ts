@@ -191,6 +191,8 @@ test('simultaneous specials share one split cut-in, and the cut-in fits a 320x56
   await page.evaluate(() => { const b = window.__panTest.battle; b.player.bread = 'francepan'; b.player.meter = 100; b.cpu.meter = 100; b.fullSince = -10; b.nextCpu = 0; b.nextMove = 99; b.cpuTarget = 0; });
   await page.keyboard.press('KeyX'); await page.clock.runFor(150);
   await expect(page.locator('#cutin')).toHaveClass(/show both/); await expect(page.locator('.cutin-band')).toHaveCount(2);
+  // CSS animations run on real time, not the fake clock: hold them at the settled middle (0.3 s) before measuring.
+  await page.evaluate(() => document.getAnimations().forEach(a => { a.pause(); a.currentTime = 300; }));
   for (const band of await page.locator('.cutin-text strong').all()) {
     const box = (await band.boundingBox())!; expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(320);
   }
