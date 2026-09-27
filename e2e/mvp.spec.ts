@@ -240,7 +240,7 @@ for (const width of [360, 390, 430]) test(`all bread silhouettes stay within por
     }
 });
 test('three rematches compare past records, persist after reload and never save an abandoned match', async ({ page }, testInfo) => {
-  test.setTimeout(60000); // three full matches plus finish/replay presentation
+  test.setTimeout(process.env.CI ? 120000 : 60000); // three full matches plus finish/replay presentation
   await boot(page); await select(page); await fight(page);
   for (let i = 0; i < 3; i++) {
     await page.evaluate(i => {

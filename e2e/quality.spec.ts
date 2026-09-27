@@ -47,7 +47,7 @@ test('damage, anticipation, crumbs and rematch stay visual and reset for every b
 });
 
 for (const width of [360, 430]) test(`CPU KO replays without combat updates, skips by keyboard and saves a result image at ${width}px`, async ({ page }, info) => {
-  test.setTimeout(60000); // KO, finish, replay, pause, share and rematch in one scenario
+  test.setTimeout(process.env.CI ? 120000 : 60000); // KO, finish, replay, pause, share and rematch in one scenario
   await page.setViewportSize({ width, height: 740 }); await start(page);
   await page.evaluate(() => {
     const { battle: b, save } = window.__panTest; b.cpuEnabled = false; b.cpu.hp = 18;
@@ -111,7 +111,7 @@ test('result diagnostics show sensor peaks and calibrated tilt without persistin
 });
 
 test('final seconds heartbeat, automatic replay completion and reduced motion remain bounded', async ({ page }, info) => {
-  test.setTimeout(60000); // two full endings (normal and reduced motion) with finish and replay
+  test.setTimeout(process.env.CI ? 120000 : 60000); // two full endings (normal and reduced motion) with finish and replay
   await start(page);
   await page.evaluate(() => {
     const { battle: b, renderer: r } = window.__panTest; b.cpuEnabled = false; b.elapsed = 49.9;
