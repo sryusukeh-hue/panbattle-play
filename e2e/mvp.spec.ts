@@ -39,8 +39,9 @@ test('first run, keyboard combat, pause/resume, result, rematch and legacy save'
   await page.waitForTimeout(400); expect((await page.evaluate(() => window.__panDiagnostics())).elapsed).toBe(frozen.elapsed);
   await page.getByRole('button', { name: '再開する →' }).click();
   await page.evaluate(() => { window.__panTest.battle.elapsed = 59.99; });
+  await page.getByRole('button', { name: 'リプレイをスキップ →' }).click();
   await expect(page.getByRole('heading', { name: 'こんがり、勝利！' })).toBeVisible();
-  await expect(page.getByText('対象なし', { exact: true })).toHaveCount(2);
+  await expect(page.getByText('機会なし', { exact: true })).toHaveCount(2);
   expect(await page.evaluate(() => localStorage.getItem('panbattle.save'))).toBe('{"keep":"legacy"}');
   await page.getByRole('button', { name: '同じパンで、もう一戦 →' }).click();
   await expect(page.locator('#app')).toHaveAttribute('data-screen', 'battle', { timeout: 6000 });
@@ -103,7 +104,7 @@ test('storage failure is visible, settings and result still work', async ({ page
   await boot(page); await page.getByRole('button', { name: '設定', exact: true }).click(); await page.getByLabel('音を鳴らす').check();
   await expect(page.locator('#save-warning')).toContainText('端末に保存できません');
   await page.getByRole('button', { name: '戻る', exact: true }).click(); await select(page); await fight(page);
-  await page.evaluate(() => { window.__panTest.battle.elapsed = 59.99; }); await expect(page.locator('#app')).toHaveAttribute('data-screen', 'result');
+  await page.evaluate(() => { window.__panTest.battle.elapsed = 59.99; }); await page.getByRole('button', { name: 'リプレイをスキップ →' }).click(); await expect(page.locator('#app')).toHaveAttribute('data-screen', 'result');
   await expect(page.getByRole('button', { name: '同じパンで、もう一戦 →' })).toBeVisible();
 });
 for (const width of [360, 390, 430]) test(`three breads and all opponent combinations render without errors at ${width}px`, async ({ page }, testInfo) => {
@@ -215,6 +216,8 @@ for (const gravitySign of [-1, 1]) test(`portrait gravity sign ${gravitySign}: p
 });
 for (const width of [360, 390, 430]) test(`all bread silhouettes stay within portrait view at lateral extremes, attack and recoil at ${width}px`, async ({ page }, testInfo) => {
   await boot(page); await select(page); await fight(page);
+  // Resizing forces a slow software-rendered frame; this test measures framing, not the long-frame pause.
+  await page.evaluate(() => { window.__panTest.stallPause = false; });
     await page.setViewportSize({ width, height: 844 });
     for (const bread of ['shokupan', 'francepan', 'croissant']) for (const x of [-1.15, 0, 1.15]) for (const state of ['ready', 'attack', 'recoil']) {
       await page.evaluate(({ bread, x, state }) => {
@@ -237,6 +240,7 @@ for (const width of [360, 390, 430]) test(`all bread silhouettes stay within por
     }
 });
 test('three rematches compare past records, persist after reload and never save an abandoned match', async ({ page }, testInfo) => {
+  test.setTimeout(60000); // three full matches plus finish/replay presentation
   await boot(page); await select(page); await fight(page);
   for (let i = 0; i < 3; i++) {
     await page.evaluate(i => {
@@ -244,6 +248,7 @@ test('three rematches compare past records, persist after reload and never save 
       b.scores.dodge = { success: i + 1, opportunities: 3 }; b.scores.counter = { success: i, opportunities: 2 };
       b.elapsed = 59.99;
     }, i);
+    await page.getByRole('button', { name: 'リプレイをスキップ →' }).click();
     await expect(page.locator('#app')).toHaveAttribute('data-screen', 'result');
     if (i === 0) await expect(page.getByText('記録なし', { exact: true })).toHaveCount(2);
     else await expect(page.getByText('自己ベスト更新', { exact: true })).toHaveCount(2);

@@ -57,4 +57,30 @@ describe('separate 3D save and scores', () => {
   it.each(['bad json', JSON.stringify({ ...defaults(), sensitivity: 99 }), JSON.stringify({ ...defaults(), best: { invalid: { dodge: { success: 9, opportunities: 1 } } } })])('corrupt data is never silently replaced: %s', raw => {
     const storage = memory(); storage.setItem(SAVE_KEY, raw); const store = new SaveStore(() => storage); expect(store.warning).not.toBe(''); expect(store.persist()).toBe(false); expect(storage.getItem(SAVE_KEY)).toBe(raw);
   });
+  it('separates difficulty records and keeps the higher best score', () => {
+    const storage = memory(), store = new SaveStore(() => storage), b = new Battle('shokupan', 'shokupan', { difficulty: 'hard' }); b.outcome = 'win';
+    b.scores.dodge = { success: 1, opportunities: 2 }; store.record(b, 'touch');
+    expect(store.data.best[condition('shokupan', 'shokupan', 'touch', 'hard')]?.dodge).toEqual({ success: 1, opportunities: 2 });
+    expect(store.data.best[condition('shokupan', 'shokupan', 'touch')]).toBeUndefined();
+    expect(store.recordScore(b, 'touch', 62)).toBeNull(); expect(store.recordScore(b, 'touch', 40)).toBe(62); expect(store.recordScore(b, 'touch', 80)).toBe(62);
+    store.data.difficulty = 'normal'; store.data.music = false; store.persist();
+    const reopened = new SaveStore(() => storage); expect(reopened.warning).toBe('');
+    expect(reopened.data.bestScoreV2).toEqual({ [condition('shokupan', 'shokupan', 'touch', 'hard')]: 80 });
+    expect(reopened.data.difficulty).toBe('normal'); expect(reopened.data.music).toBe(false);
+    const practice = new Battle('shokupan', 'shokupan', { practice: true }); practice.outcome = 'win';
+    expect(store.recordScore(practice, 'touch', 99)).toBeNull(); expect(Object.keys(store.data.bestScoreV2!)).toHaveLength(1);
+  });
+  it.each([{ difficulty: 'extreme' }, { music: 'yes' }, { bestScoreV2: { 'table-1/shokupan/shokupan/hard/touch': 101 } }, { bestScoreV2: { nope: 5 } }, { bestScoreV2: [] }])('rejects invalid optional field %j without replacing it', extra => {
+    const storage = memory(), raw = JSON.stringify({ ...defaults(), ...extra }); storage.setItem(SAVE_KEY, raw);
+    const store = new SaveStore(() => storage); expect(store.warning).not.toBe(''); expect(store.persist()).toBe(false); expect(storage.getItem(SAVE_KEY)).toBe(raw);
+  });
+  it('keeps a legacy bestScore field untouched while comparing only bestScoreV2', () => {
+    const storage = memory(), legacy = { ...defaults(), bestScore: { 'table-1/shokupan/shokupan/gentle/touch': 99 } };
+    storage.setItem(SAVE_KEY, JSON.stringify(legacy));
+    const store = new SaveStore(() => storage), b = new Battle('shokupan', 'shokupan'); b.outcome = 'win';
+    expect(store.warning).toBe(''); expect(store.recordScore(b, 'touch', 50)).toBeNull();
+    const saved = JSON.parse(storage.getItem(SAVE_KEY)!);
+    expect(saved.bestScore).toEqual(legacy.bestScore); expect(saved.bestScoreV2).toEqual({ 'table-1/shokupan/shokupan/gentle/touch': 50 });
+  });
 });
+

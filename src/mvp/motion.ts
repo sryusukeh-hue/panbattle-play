@@ -18,6 +18,7 @@ export class MotionFilter {
   private tiltHoldUntil = 0;
   private history: { time: number; angle: number }[] = [];
   private candidate: number | null = null;
+  get attackThreshold(): number { return 7 / this.attackSensitivity; }
   motion(s: MotionSample, enabled: boolean): void {
     if (![s.time, s.x, s.y, s.z].every(finite)) { this.reset(); return; }
     const gap = s.time - this.lastSample;
@@ -25,7 +26,7 @@ export class MotionFilter {
     const magnitude = Math.hypot(s.x!, s.y!, s.z!);
     if (gap <= 0 || gap > MOTION_TUNING.maxSampleGapMs) { this.armed = false; this.quietSince = -Infinity; this.candidate = null; return; }
     if (!enabled) this.candidate = null;
-    const high = 7 / this.attackSensitivity, low = high * .32;
+    const high = this.attackThreshold, low = high * .32;
     if (magnitude < low) {
       if (!Number.isFinite(this.quietSince)) this.quietSince = s.time;
       if (s.time - this.quietSince >= MOTION_TUNING.quietMs && s.time >= this.inhibitUntil) this.armed = true;

@@ -1,10 +1,25 @@
 import { describe, expect, it } from 'vitest';
-import { Battle, phase, pose, touching } from './battle';
+import { Battle, CPU_RECOVER_GAP, CPU_STYLE, DIFFICULTY, HIT_STOP_SECONDS, phase, pose, touching } from './battle';
 import { BREADS, BREAD_IDS, LIMIT, STEP, type BreadId } from './config';
+import { createBattle, startAttack, stepBattle, type BattleEvent as SharedEvent } from '../shared/battle';
 
 function run(b: Battle, seconds: number, target = b.player.x): void { for (let i = 0; i < seconds / STEP; i++) b.advance(STEP, target); }
 function duel(p: BreadId = 'shokupan', c: BreadId = 'shokupan'): Battle { const b = new Battle(p, c); b.cpuEnabled = false; return b; }
 describe('3D contact and battle rules', () => {
+  it.each([false, true])('hit stop freezes both fighters and the clock, including practice=%s', practice => {
+    const b = duel(); b.practice = practice; b.attack('player');
+    while (!b.events.some(e => e.kind === 'hit')) b.advance(STEP, 0);
+    const frozen = structuredClone(b.state), poses = [pose(b.player, 'player'), pose(b.cpu, 'cpu')];
+    b.advance(HIT_STOP_SECONDS / 2, LIMIT, true); b.advance(HIT_STOP_SECONDS / 2, -LIMIT, true);
+    expect(b.state).toEqual(frozen); expect([pose(b.player, 'player'), pose(b.cpu, 'cpu')]).toEqual(poses);
+    b.advance(STEP, 0); expect(b.elapsed - frozen.elapsed).toBeCloseTo(STEP);
+  });
+  it('stops once for a clash and consumes frame remainder instead of catching up after the stop', () => {
+    const b = duel(); b.attack('cpu'); run(b, .65); b.attack('player');
+    while (!b.events.some(e => e.kind === 'clash')) b.advance(STEP, 0);
+    const frozen = structuredClone(b.state); b.advance(.06, 0); expect(b.state).toEqual(frozen);
+    b.advance(.01 + STEP, 0); expect(b.elapsed - frozen.elapsed).toBeCloseTo(STEP);
+  });
   it('idle never causes damage; a single swing contacts only once', () => {
     const b = duel(); run(b, 2); expect(b.cpu.hp).toBe(100); b.attack('player');
     run(b, .6); expect(b.cpu.hp).toBe(82); run(b, .6); expect(b.cpu.hp).toBe(82);
@@ -72,7 +87,7 @@ describe('3D contact and battle rules', () => {
   it('practice keeps offering CPU attacks beyond 60 seconds', () => {
     const b = new Battle('shokupan', 'shokupan', { practice: true }); b.practiceStage = 1;
     run(b, 70); const count = b.scores.dodge.opportunities; run(b, 5);
-    expect(b.elapsed).toBeGreaterThan(74); expect(b.scores.dodge.opportunities).toBeGreaterThan(count); expect(b.outcome).toBeNull();
+    expect(b.elapsed).toBeGreaterThan(70); expect(b.scores.dodge.opportunities).toBeGreaterThan(count); expect(b.outcome).toBeNull();
   });
   it('symmetric collision does not depend on update ordering', () => {
     const b = duel(); b.attack('player'); b.player.attack!.age = .3;
@@ -81,6 +96,35 @@ describe('3D contact and battle rules', () => {
 });
 
 describe('CPU policy comparison', () => {
+  it.each(BREAD_IDS)('%s: seeded behavior varies safely while retaining anticipation, fixed aim and recovery', bread => {
+    function trace(seed: number) {
+      const b = new Battle('shokupan', bread, { seed }); b.player.hp = 10000;
+      const starts: { time: number; aim: number; windup: number; recovery: number }[] = [], positions: number[] = [];
+      const aims = new Map<number, number>();
+      for (let i = 0; i < 8000 && !b.outcome; i++) {
+        b.advance(STEP, Math.sin(i * .01));
+        const attack = b.cpu.attack;
+        if (attack) {
+          if (!aims.has(attack.id)) { aims.set(attack.id, attack.aim); starts.push({ time: b.elapsed, aim: attack.aim, windup: attack.windup, recovery: attack.recovery }); }
+          expect(attack.aim).toBe(aims.get(attack.id));
+        }
+        if (i % 30 === 0) positions.push(b.cpu.x);
+        b.drainEvents();
+      }
+      return { starts, positions };
+    }
+    const first = trace(42); expect(first).toEqual(trace(42)); expect(first).not.toEqual(trace(43));
+    expect(new Set(first.positions).size).toBeGreaterThan(5);
+    const intervals = first.starts.slice(1).map((s, i) => s.time - first.starts[i]!.time);
+    expect(intervals.some(v => Math.abs(v - CPU_STYLE[bread].pairInterval) < STEP * 2)).toBe(true);
+    expect(intervals.some(v => v >= CPU_STYLE[bread].interval)).toBe(true);
+    for (const start of first.starts) { expect(start.windup).toBeGreaterThanOrEqual(BREADS[bread].windup + .65); expect(start.recovery).toBeGreaterThanOrEqual(BREADS[bread].recovery + .55); }
+    for (let i = 0; i < intervals.length; i++) {
+      expect(intervals[i]!).toBeGreaterThanOrEqual(2.7 - STEP);
+      const previous = first.starts[i]!;
+      expect(intervals[i]! - previous.windup - BREADS[bread].active - previous.recovery).toBeGreaterThanOrEqual(CPU_RECOVER_GAP - STEP);
+    }
+  });
   function simulate(policy: 'mash' | 'counter', bread: BreadId): Battle {
     const b = new Battle(bread, 'shokupan', { seed: 42 }); let evading = false;
     for (let i = 0; i < 60 / STEP && !b.outcome; i++) {
@@ -96,5 +140,85 @@ describe('CPU policy comparison', () => {
   it.each(BREAD_IDS)('%s: reacting to telegraphs wins while retaining more HP than mashing', bread => {
     const mash = simulate('mash', bread), counter = simulate('counter', bread);
     expect(counter.outcome).toBe('win'); expect(counter.player.hp).toBeGreaterThan(mash.player.hp); expect(counter.scores.dodge.success).toBeGreaterThan(0); expect(counter.scores.counter.success).toBeGreaterThan(0);
+  });
+});
+
+describe('CPU difficulty', () => {
+  function swings(difficulty: 'gentle' | 'normal' | 'hard') {
+    const b = new Battle('shokupan', 'shokupan', { seed: 7, difficulty }); b.player.hp = 10000; b.cpu.hp = 10000;
+    let misses = 0, windup = Infinity, dodges = 0;
+    for (let i = 0; i < 40 / STEP; i++) {
+      b.advance(STEP, 0, !b.player.attack && i % 90 === 0);
+      if (b.cpu.attack) windup = Math.min(windup, b.cpu.attack.windup);
+      for (const e of b.drainEvents()) { if (e.kind === 'miss' && e.side === 'player') misses++; if (e.kind === 'dodge' && e.side === 'cpu') dodges++; }
+    }
+    return { misses, windup, dodges };
+  }
+  it('keeps gentle timings and makes higher levels quicker and evasive', () => {
+    const gentle = swings('gentle'), normal = swings('normal'), hard = swings('hard');
+    expect(gentle.windup).toBeCloseTo(BREADS.shokupan.windup + DIFFICULTY.gentle.windup, 5);
+    expect(hard.windup).toBeCloseTo(BREADS.shokupan.windup + DIFFICULTY.hard.windup, 5);
+    expect(normal.windup).toBeLessThan(gentle.windup); expect(hard.windup).toBeLessThan(normal.windup);
+    expect(hard.misses).toBeGreaterThan(gentle.misses); expect(gentle.dodges).toBe(0); expect(hard.dodges).toBeGreaterThan(0); expect(hard.dodges).toBeLessThanOrEqual(hard.misses);
+  });
+  it('practice always uses the gentle CPU', () => {
+    expect(new Battle('shokupan', 'shokupan', { practice: true, difficulty: 'hard' }).difficulty).toBe('gentle');
+  });
+  it.each(BREAD_IDS)('%s: a reacting player can still beat the hard CPU', bread => {
+    const b = new Battle(bread, 'shokupan', { seed: 42, difficulty: 'hard' }); let evading = false;
+    for (let i = 0; i < 60 / STEP && !b.outcome; i++) {
+      const cpuPhase = phase(b.cpu);
+      if (cpuPhase === 'windup') evading = true;
+      if (cpuPhase === 'recovery' || cpuPhase === 'ready') evading = false;
+      const target = evading ? (b.cpu.attack!.aim >= 0 ? -LIMIT : LIMIT) : 0;
+      b.advance(STEP, target, !evading && b.counterAvailable && b.elapsed <= b.counterUntil); b.drainEvents();
+    }
+    expect(b.player.hp).toBeGreaterThan(0); expect(b.outcome).not.toBe('lose');
+  });
+});
+
+describe('CPU reads (round 3 fixes)', () => {
+  it('flags a swing that restarts right after the previous one as mashing', () => {
+    const b = new Battle('croissant', 'shokupan', { seed: 3, difficulty: 'hard' }); b.cpuEnabled = true; b.player.hp = b.cpu.hp = 1e4;
+    const ids = new Set<number>();
+    for (let i = 0; i < 3 / STEP; i++) { b.advance(STEP, 0, true); if (b.player.attack) ids.add(b.player.attack.id); b.drainEvents(); }
+    expect(ids.size).toBeGreaterThan(2); expect((b as unknown as { mashed: number }).mashed).toBeGreaterThan(1);
+  });
+  it('sidesteps away from the fixed aim, not toward it', () => {
+    const b = new Battle('shokupan', 'shokupan', { seed: 1, difficulty: 'hard' }); (b as unknown as { random: () => number }).random = () => 0;
+    b.player.x = -.85; b.cpu.x = .65; (b as unknown as { nextCpu: number }).nextCpu = 99;
+    b.advance(STEP, -.85, true); const aim = b.player.attack!.aim;
+    for (let i = 0; i < .1 / STEP; i++) b.advance(STEP, -.85);
+    expect(aim).toBeCloseTo(0, 5); expect((b as unknown as { cpuTarget: number }).cpuTarget).toBeGreaterThan(.65);
+  });
+  it('hard CPU earns a counter window long enough to land, with scaled damage; PvP ignores both', () => {
+    const b = new Battle('shokupan', 'shokupan', { seed: 1, difficulty: 'hard' }); (b as unknown as { random: () => number }).random = () => 0;
+    (b as unknown as { nextCpu: number }).nextCpu = 99; b.advance(STEP, 0, true);
+    let window = 0;
+    for (let i = 0; i < 1.2 / STEP && !window; i++) { b.advance(STEP, 0); if (b.state.counters.B.available) window = b.state.counters.B.until - b.elapsed; }
+    expect(window).toBeGreaterThan(BREADS.shokupan.recovery + DIFFICULTY.hard.grace - .05);
+    const hit = new Battle('shokupan', 'shokupan', { difficulty: 'hard' }); hit.cpuEnabled = false; hit.attack('cpu');
+    for (let i = 0; i < 1.5 / STEP && hit.player.hp === 100; i++) hit.advance(STEP, 0);
+    expect(100 - hit.player.hp).toBeCloseTo(BREADS.shokupan.damage * DIFFICULTY.hard.damage, 5);
+    const pvp = createBattle('shokupan', 'shokupan', 'pvp'); pvp.cpuExtra = { windup: .2, recovery: .15, counters: true, damage: 3, grace: 2 };
+    const events: SharedEvent[] = []; startAttack(pvp, 'B', events);
+    for (let i = 0; i < 1.5 / STEP && pvp.fighters.A.hp === 100; i++) stepBattle(pvp, { A: { target: 0, attack: false }, B: { target: 0, attack: false } }, events);
+    expect(100 - pvp.fighters.A.hp).toBe(BREADS.shokupan.damage);
+  });
+  it('hard CPU dodge leads to a counter that lands with both bonuses', () => {
+    const b = new Battle('francepan', 'shokupan', { seed: 1, difficulty: 'hard' }); (b as unknown as { random: () => number }).random = () => 0;
+    (b as unknown as { nextCpu: number }).nextCpu = 99; b.player.hp = 1e4; b.advance(STEP, 0, true);
+    let counter = false; const before = b.player.hp;
+    for (let i = 0; i < 2.5 / STEP && !counter; i++) { b.advance(STEP, 0); counter = b.drainEvents().some(e => e.kind === 'counter' && e.side === 'cpu'); }
+    expect(counter).toBe(true); expect(before - b.player.hp).toBeCloseTo(BREADS.shokupan.damage * 1.25 * DIFFICULTY.hard.damage, 5);
+  });
+  it('PvP state and events are identical with or without CPU extras', () => {
+    const run = (extra: boolean) => {
+      const s = createBattle('croissant', 'francepan', 'pvp'); if (extra) s.cpuExtra = { windup: .1, recovery: .1, counters: true, damage: 3, grace: 2 };
+      const events: SharedEvent[] = [];
+      for (let i = 0; i < 20 / STEP; i++) stepBattle(s, { A: { target: Math.sin(i * .013), attack: i % 97 === 0 }, B: { target: Math.cos(i * .011), attack: i % 131 === 0 } }, events);
+      const { cpuExtra: _ignored, ...rest } = s; return JSON.stringify({ rest, events });
+    };
+    expect(run(true)).toBe(run(false));
   });
 });

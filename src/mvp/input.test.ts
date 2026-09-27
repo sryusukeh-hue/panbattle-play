@@ -29,6 +29,29 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('sensor permission and actual input reception', () => {
+  it('measures only active sensor play, retaining peaks through pause and sensitivity changes', async () => {
+    const request = input.request(); await vi.advanceTimersByTimeAsync(0); motion(-1, 10, 50); await vi.advanceTimersByTimeAsync(80); await request;
+    expect(input.metrics().maxSwing).toBeNull(); input.sensor.calibrate(performance.now()); input.mode = 'sensor'; input.setEnabled(true);
+    vi.advanceTimersByTime(10); motion(-1, 20, 12);
+    input.sensor.attackSensitivity = 1.4; vi.advanceTimersByTime(10); motion(-1, -5, 8);
+    expect(input.metrics()).toMatchObject({ maxSwing: 12, threshold: 5, minThreshold: 5, maxThreshold: 7 });
+    expect(input.metrics().minTilt).toBeCloseTo(-15); expect(input.metrics().maxTilt).toBeCloseTo(10);
+    const measured = input.metrics(); input.setEnabled(false); vi.advanceTimersByTime(10); motion(-1, 80, 100); expect(input.metrics()).toEqual(measured);
+    input.setEnabled(true); motion(-1, 0, NaN); orientation(null); expect(input.metrics()).toEqual(measured);
+    input.clear(); expect(input.metrics()).toEqual(measured); input.resetMetrics(); expect(input.metrics().maxSwing).toBeNull(); expect(input.metrics().minTilt).toBeNull();
+  });
+  it('measures the actual orientation fallback relative to calibration, ignoring invalid angles', async () => {
+    const request = input.request(); await vi.advanceTimersByTimeAsync(0); motion(); await vi.advanceTimersByTimeAsync(80); await request;
+    input.sensor.calibrate(performance.now()); input.mode = 'sensor'; input.setEnabled(true);
+    await vi.advanceTimersByTimeAsync(260); orientation(-16); orientation(24); orientation(91); orientation(null);
+    expect(input.metrics()).toMatchObject({ minTilt: -16, maxTilt: 24, maxSwing: null });
+  });
+  it('distinguishes a measured zero from no sample and exposes a detached summary', async () => {
+    const request = input.request(); await vi.advanceTimersByTimeAsync(0); motion(); await vi.advanceTimersByTimeAsync(80); await request;
+    input.sensor.calibrate(performance.now()); input.mode = 'sensor'; input.setEnabled(true); motion();
+    expect(input.metrics().maxSwing).toBe(0); const summary = input.metrics(); summary.maxSwing = 999;
+    expect(input.metrics().maxSwing).toBe(0); input.mode = 'touch'; motion(-1, 45, 99); expect(input.metrics().maxSwing).toBe(0);
+  });
   it('uses same-event gravity to reject a quick dodge and accepts the following counter once', async () => {
     const request = input.request(); await vi.advanceTimersByTimeAsync(0);
     motion(); await vi.advanceTimersByTimeAsync(80); await request;

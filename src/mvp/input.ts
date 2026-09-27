@@ -2,12 +2,15 @@ import { LIMIT, type Mode } from './config';
 import { MotionFilter, finite, gravityRoll } from './motion';
 
 type SensorConstructor = { requestPermission?: () => Promise<string> };
+interface SensorMetrics { maxSwing: number | null; minTilt: number | null; maxTilt: number | null; minThreshold: number | null; maxThreshold: number | null }
+const emptyMetrics = (): SensorMetrics => ({ maxSwing: null, minTilt: null, maxTilt: null, minThreshold: null, maxThreshold: null });
 export class GameInput {
   mode: Mode = 'touch'; sensor = new MotionFilter(); enabled = false; pending = false;
   detectedAt = -Infinity; private left = false; private right = false;
   private pointerDirections = new Map<number, number>(); private held = new Set<string>();
   private attached = false;
   private lastGravityAt = -Infinity;
+  private measured = emptyMetrics();
   constructor(controls: HTMLElement, private pause: () => void) {
     window.addEventListener('keydown', e => {
       if (e.code === 'Escape') { e.preventDefault(); this.pause(); return; }
@@ -44,6 +47,14 @@ export class GameInput {
   }
   clear(): void { this.pending = false; this.held.clear(); this.keys(); this.pointerDirections.clear(); this.sensor.reset(); }
   setEnabled(enabled: boolean): void { if (this.enabled !== enabled) this.clear(); this.enabled = enabled; }
+  resetMetrics(): void { this.measured = emptyMetrics(); }
+  metrics(): SensorMetrics & { threshold: number } { return { ...this.measured, threshold: this.sensor.attackThreshold }; }
+  private receiveOrientation(angle: number | null, time: number): void {
+    this.sensor.orientation(angle, time);
+    if (!this.enabled || this.mode !== 'sensor' || !finite(angle) || Math.abs(angle) > 90 || this.sensor.lastOrientation !== time || this.sensor.baseline === null) return;
+    const delta = angle - this.sensor.baseline;
+    this.measured.minTilt = Math.min(this.measured.minTilt ?? delta, delta); this.measured.maxTilt = Math.max(this.measured.maxTilt ?? delta, delta);
+  }
   async request(): Promise<void> {
     this.clear(); this.sensor.baseline = null; this.lastGravityAt = -Infinity;
     if (!window.isSecureContext) throw new Error('動きの操作にはHTTPSが必要です。HTTPSで開き直すか、補助操作を選んでください。');
@@ -56,14 +67,21 @@ export class GameInput {
         const g = e.accelerationIncludingGravity;
         if (finite(g?.x) && finite(g?.y) && finite(a?.x) && finite(a?.y)) {
           const roll = gravityRoll(g.x - a.x, g.y - a.y);
-          if (roll !== null) { this.sensor.orientation(roll, now); this.lastGravityAt = now; }
+          if (roll !== null) { this.receiveOrientation(roll, now); this.lastGravityAt = now; }
         }
         this.sensor.motion({ time: now, x: a?.x ?? null, y: a?.y ?? null, z: a?.z ?? null }, this.enabled && this.mode === 'sensor');
+        if (this.enabled && this.mode === 'sensor' && finite(a?.x) && finite(a?.y) && finite(a?.z)) {
+          const strength = Math.hypot(a.x, a.y, a.z), threshold = this.sensor.attackThreshold;
+          if (Number.isFinite(strength)) {
+            this.measured.maxSwing = Math.max(this.measured.maxSwing ?? 0, strength);
+            this.measured.minThreshold = Math.min(this.measured.minThreshold ?? threshold, threshold); this.measured.maxThreshold = Math.max(this.measured.maxThreshold ?? threshold, threshold);
+          }
+        }
       });
       window.addEventListener('deviceorientation', e => {
         const now = performance.now();
         // A flat pose or a missing gravity component must not disable valid gamma forever.
-        if (now - this.lastGravityAt > 250) this.sensor.orientation(e.gamma, now);
+        if (now - this.lastGravityAt > 250) this.receiveOrientation(e.gamma, now);
       });
       this.attached = true;
     }

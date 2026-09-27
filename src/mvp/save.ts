@@ -1,9 +1,14 @@
 import { BREAD_IDS, RULE, type BreadId, type Mode } from './config';
-import { type Battle, type Metric, type Scores } from './battle';
+import { DIFFICULTIES, type Battle, type Difficulty, type Metric, type Scores } from './battle';
 export const SAVE_KEY = 'panbattle.3d.v1';
-export interface Saved { version: 1; sound: boolean; sensitivity: number; attackSensitivity: number; tiltSensitivity: number; bread: BreadId; cpu: BreadId; practiced: boolean; best: Record<string, Partial<Scores>> }
+export interface Saved { version: 1; sound: boolean; sensitivity: number; attackSensitivity: number; tiltSensitivity: number; bread: BreadId; cpu: BreadId; practiced: boolean; best: Record<string, Partial<Scores>>;
+  // Optional fields added without a version bump; absent means the pre-existing behaviour.
+  difficulty?: Difficulty; music?: boolean;
+  // Versioned: the score formula changed on 2026-09-27, so earlier numbers are not comparable.
+  bestScoreV2?: Record<string, number> }
 export const defaults = (): Saved => ({ version: 1, sound: false, sensitivity: 1, attackSensitivity: 1, tiltSensitivity: 1, bread: 'shokupan', cpu: 'shokupan', practiced: false, best: {} });
-export const condition = (player: BreadId, cpu: BreadId, mode: Mode): string => `${RULE}/${player}/${cpu}/gentle/${mode}`;
+export const condition = (player: BreadId, cpu: BreadId, mode: Mode, difficulty: Difficulty = 'gentle'): string => `${RULE}/${player}/${cpu}/${difficulty}/${mode}`;
+const KEY = /^table-1\/(shokupan|francepan|croissant)\/(shokupan|francepan|croissant)\/(gentle|normal|hard)\/(sensor|touch|keyboard)$/;
 export const rate = (m: Metric | undefined): number | null => m && m.opportunities > 0 ? m.success / m.opportunities : null;
 function validMetric(m: unknown): m is Metric {
   if (!m || typeof m !== 'object') return false;
@@ -19,7 +24,13 @@ export class SaveStore {
       const value = JSON.parse(raw) as Saved;
       if (!value || value.version !== 1 || typeof value.sound !== 'boolean' || typeof value.practiced !== 'boolean' || !BREAD_IDS.includes(value.bread) || !BREAD_IDS.includes(value.cpu) || !Number.isFinite(value.sensitivity) || value.sensitivity < .6 || value.sensitivity > 1.6 || !value.best || typeof value.best !== 'object' || Array.isArray(value.best)) throw new Error('invalid');
       for (const [key, scores] of Object.entries(value.best)) {
-        if (!/^table-1\/(shokupan|francepan|croissant)\/(shokupan|francepan|croissant)\/gentle\/(sensor|touch|keyboard)$/.test(key) || !scores || typeof scores !== 'object' || (scores.dodge !== undefined && !validMetric(scores.dodge)) || (scores.counter !== undefined && !validMetric(scores.counter))) throw new Error('invalid');
+        if (!KEY.test(key) || !scores || typeof scores !== 'object' || (scores.dodge !== undefined && !validMetric(scores.dodge)) || (scores.counter !== undefined && !validMetric(scores.counter))) throw new Error('invalid');
+      }
+      if (value.difficulty !== undefined && !DIFFICULTIES.includes(value.difficulty)) throw new Error('invalid');
+      if (value.music !== undefined && typeof value.music !== 'boolean') throw new Error('invalid');
+      if (value.bestScoreV2 !== undefined) {
+        if (!value.bestScoreV2 || typeof value.bestScoreV2 !== 'object' || Array.isArray(value.bestScoreV2)) throw new Error('invalid');
+        for (const [key, score] of Object.entries(value.bestScoreV2)) if (!KEY.test(key) || !Number.isInteger(score) || score < 0 || score > 100) throw new Error('invalid');
       }
       const sensitivities = { attackSensitivity: value.attackSensitivity === undefined ? value.sensitivity : value.attackSensitivity,
         tiltSensitivity: value.tiltSensitivity === undefined ? value.sensitivity : value.tiltSensitivity };
@@ -34,7 +45,7 @@ export class SaveStore {
     catch { this.warning = '端末に保存できませんでした。今回の設定と成績は、この画面を閉じるまで保持します。'; return false; }
   }
   record(battle: Battle, mode: Mode): Partial<Scores> {
-    const key = condition(battle.player.bread, battle.cpu.bread, mode);
+    const key = condition(battle.player.bread, battle.cpu.bread, mode, battle.difficulty);
     const previous = structuredClone(this.data.best[key] ?? {});
     if (battle.practice || battle.outcome === null) return previous;
     const next = structuredClone(previous);
@@ -43,5 +54,12 @@ export class SaveStore {
       if (value !== null && (best === null || value > best)) next[field] = { ...score };
     }
     this.data.best[key] = next; this.persist(); return previous;
+  }
+  // Returns the previous best score for the same condition (null when none), then keeps the higher one.
+  recordScore(battle: Battle, mode: Mode, score: number): number | null {
+    const key = condition(battle.player.bread, battle.cpu.bread, mode, battle.difficulty), previous = this.data.bestScoreV2?.[key] ?? null;
+    if (battle.practice || battle.outcome === null || !Number.isInteger(score) || score < 0 || score > 100) return previous;
+    if (previous === null || score > previous) { this.data.bestScoreV2 = { ...this.data.bestScoreV2, [key]: score }; this.persist(); }
+    return previous;
   }
 }
