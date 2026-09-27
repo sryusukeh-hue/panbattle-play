@@ -57,6 +57,7 @@ const modes: Record<Mode, string> = { sensor: '振る・傾ける', touch: 'タ�
 const emoji: Record<BreadId, string> = { shokupan: '🍞', francepan: '🥖', croissant: '🥐' };
 const button = (action: string, label: string, secondary = false): string => `<button data-action="${action}" class="${secondary ? 'secondary' : 'primary'}">${label}</button>`;
 const header = (eyebrow: string, title: string, description = ''): string => `<div class="eyebrow">${eyebrow}</div><h1>${title}</h1>${description ? `<p>${description}</p>` : ''}`;
+const RAGE_TIP = 'CPUのゲージが一気にたまる！ ひっさつに注意';
 function say(text: string, seconds = 1.2): void { toast.textContent = text; toastUntil = performance.now() + seconds * 1000; }
 function restart(element: HTMLElement, className: string): void { element.classList.remove(className); void element.offsetWidth; element.classList.add(className); }
 function banner(text: string, kind: string): void { bannerElement.textContent = text; bannerElement.className = ''; void bannerElement.offsetWidth; bannerElement.className = `show ${kind}`; }
@@ -78,6 +79,9 @@ function showCutin(who: Side | 'both', seek = 0): void {
     const bread = battle[side].bread, spec = SPECIALS[bread];
     return `<div class="cutin-band ${side}"><div class="cutin-portrait">${thumbs[bread] ? `<img src="${thumbs[bread]}" alt="">` : emoji[bread]}</div><div class="cutin-text"><small>${side === 'player' ? 'YOU' : 'CPU'} · ひっさつ！</small><strong><b>${spec.kicker}</b>${spec.title}</strong><span>${spec.ruby}</span>${side === 'cpu' ? '<em>横へ回避！</em>' : ''}</div></div>`;
   };
+  // The move name is the only big notice during the move: the CPU rage banner and its gauge tip end here, so the face stays visible.
+  if (bannerElement.classList.contains('rage')) bannerElement.className = '';
+  if (toast.textContent === RAGE_TIP) { toast.textContent = ''; toastUntil = 0; }
   cutinElement.className = `show ${who}`; cutinElement.style.setProperty('--seek', `${-seek}s`);
   cutinElement.innerHTML = `<div class="cutin-dim"></div><div class="cutin-lines"></div>${sides.map(band).join('')}`;
   clearTimeout(cutinTimer);
@@ -176,7 +180,7 @@ function draw(): void {
   hud.hidden = !playing; controls.hidden = !['battle', 'practice'].includes(screen) || input.mode !== 'touch';
   screenElement.className = playing ? 'play-overlay' : `menu ${screen === 'title' ? 'title-screen' : ''}`;
   if (playing) {
-    hud.innerHTML = `<div class="topline"><span class="match-label">${screen === 'practice' ? 'ダメージなしの練習' : '食卓 / CPU戦'}</span><button data-action="pause" aria-label="一時停止">Ⅱ</button></div><div class="health-row"><div class="health"><span>YOU · ${BREADS[battle.player.bread].name}</span><div class="health-track"><s id="player-ghost"></s><i id="player-health"></i></div><div class="meter" id="player-meter" role="img" aria-label="ひっさつゲージ"><i></i></div><b><span id="player-hp">100</span><em class="meter-tag" id="player-meter-tag"></em></b></div><div class="timer" id="timer">60</div><div class="health enemy"><span>CPU · ${BREADS[battle.cpu.bread].name}</span><div class="health-track"><s id="cpu-ghost"></s><i id="cpu-health"></i></div><div class="meter" id="cpu-meter" role="img" aria-label="CPUのひっさつゲージ"><i></i></div><b><em class="meter-tag" id="cpu-meter-tag"></em><span id="cpu-hp">100</span></b></div></div><div class="status-line" id="battle-status"></div>`;
+    hud.innerHTML = `<div class="topline"><span class="match-label">${screen === 'practice' ? 'ダメージなしの練習' : '食卓 / CPU戦'}</span><button data-action="pause" aria-label="一時停止">Ⅱ</button></div><div class="health-row"><img class="you-face" id="you-face" alt="" hidden><div class="health"><span>YOU · ${BREADS[battle.player.bread].name}</span><div class="health-track"><s id="player-ghost"></s><i id="player-health"></i></div><div class="meter" id="player-meter" role="img" aria-label="ひっさつゲージ"><i></i></div><b><span id="player-hp">100</span><em class="meter-tag" id="player-meter-tag"></em></b></div><div class="timer" id="timer">60</div><div class="health enemy"><span>CPU · ${BREADS[battle.cpu.bread].name}</span><div class="health-track"><s id="cpu-ghost"></s><i id="cpu-health"></i></div><div class="meter" id="cpu-meter" role="img" aria-label="CPUのひっさつゲージ"><i></i></div><b><em class="meter-tag" id="cpu-meter-tag"></em><span id="cpu-hp">100</span></b></div></div><div class="status-line" id="battle-status"></div>`;
     if (screen === 'countdown') lastCount = 0; // redraw restarts the number from the markup
     if (screen === 'countdown') screenElement.innerHTML = `<div class="countdown"><span>構えて、相手を見よう</span><strong id="count">3</strong><em>${DIFFICULTY[battle.difficulty].label}CPU · ${BREADS[battle.cpu.bread].name}</em></div>`;
     else screenElement.innerHTML = `<div class="play-tip" id="play-tip"></div>`;
@@ -257,6 +261,15 @@ function prepareShare(): void {
   }).catch(() => { if (generation === shareGeneration) { shareFailed = true; say('結果画像を作成できませんでした。もう一度試せます。', 3); } }).finally(() => {
     if (generation === shareGeneration) { sharePreparing = false; updateShareButton(); }
   });
+}
+// Your own bread's face (the camera shows its back in battle). Called right after each render so it never lags a
+// frame, including the finish slow-motion; the image only changes when the mood does.
+function updateYouFace(): void {
+  // Portraits are drawn ahead on menus (preparePortraits); here they are only looked up.
+  const face = document.querySelector<HTMLImageElement>('#you-face');
+  if (!face || hud.hidden || !renderer) return;
+  const src = renderer.portrait(battle.player.bread, renderer.playerMood());
+  if (src && face.getAttribute('src') !== src) { face.src = src; face.hidden = false; }
 }
 function updateHud(): void {
   const p = document.querySelector<HTMLElement>('#player-health'), c = document.querySelector<HTMLElement>('#cpu-health');
@@ -376,7 +389,7 @@ app.addEventListener('click', e => {
   }
   if (target?.dataset.action) void action(target.dataset.action);
   if (target?.dataset.bread && screen === 'select') {
-    save.data.bread = target.dataset.bread as BreadId; save.persist(); battle = new Battle(save.data.bread, save.data.cpu); draw();
+    save.data.bread = target.dataset.bread as BreadId; save.persist(); battle = new Battle(save.data.bread, save.data.cpu); renderer?.preparePortraits(save.data.bread); draw();
     screenElement.querySelector<HTMLElement>(`[data-bread="${save.data.bread}"]`)?.focus();
   }
 });
@@ -411,7 +424,7 @@ function frame(now: number): void {
   if (screen === 'finish') {
     if (!document.hidden && renderer) {
       finishLeft -= Math.min(dt, .1);
-      try { renderer.render(battle, battle.elapsed, Math.min(dt, .1), true, undefined, .3); }
+      try { renderer.render(battle, battle.elapsed, Math.min(dt, .1), true, undefined, .3); updateYouFace(); }
       catch { fail('3D画面を描画できません。再読み込みを試してください。'); return; }
       if (finishLeft <= 0) { if (renderer.startReplay()) transition('replay'); else enterResult(); }
     }
@@ -485,7 +498,7 @@ function frame(now: number): void {
       if (phase(fighter) !== 'recovery' && !battle.outcome) continue;
       hitsShown[side] = attack.id; popup(side === 'player' ? 'cpu' : 'player', `${landedStages(side)}HIT!`, 'combo', 1.25);
     }
-    if (battle.cpuCharging && !cpuCharged) { cpuCharged = true; banner('CPUが本気だ！', 'rage'); say('CPUのゲージが一気にたまる！ ひっさつに注意', 1.8); }
+    if (battle.cpuCharging && !cpuCharged) { cpuCharged = true; banner('CPUが本気だ！', 'rage'); say(RAGE_TIP, 1.8); }
     // The special drill ends once a special has landed and finished, so the whole move plays out.
     if (screen === 'practice' && practiceStage === PRACTICE_SPECIAL_STAGE && battle.specialStep === 'fire' && specialLanded && !battle.player.attack?.special) {
       save.data.practicedSpecial = true; save.persist(); transition('practice-done');
@@ -498,6 +511,7 @@ function frame(now: number): void {
     try {
       renderer.render(battle, active ? battle.elapsed : now / 1000, active ? Math.min(dt, .1) : 0, active && !battle.paused, { ...(battle.practice ? {} : { remaining: 60 - battle.elapsed }), cue: stanceCue(), frozen: battle.freezing, charging: battle.cpuCharging });
       if (acceptedAt !== null) { renderer.noteLatency(performance.now() - acceptedAt); acceptedAt = null; }
+      updateYouFace();
       if (battle.outcome && screen === 'battle') {
         previousBest = save.record(battle, input.mode);
         const input_ = { outcome: battle.outcome, hpRatio: battle.player.hp / BREADS[battle.player.bread].hp, scores: battle.scores, stats }, score = matchScore(input_);
@@ -511,7 +525,7 @@ draw(); environment(); requestAnimationFrame(frame);
 try {
   renderer = new TableRenderer(canvas, fail, audio.play, audio.stop);
   const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 15000));
-  void Promise.race([renderer.load(), timeout]).then(() => { ready = true; thumbs = renderer!.thumbnails(); if (screen === 'title' || screen === 'select') draw(); }).catch(() => fail('パンの3D素材を読み込めませんでした。通信状態を確認して再試行してください。'));
+  void Promise.race([renderer.load(), timeout]).then(() => { ready = true; thumbs = renderer!.thumbnails(); renderer!.preparePortraits(save.data.bread); if (screen === 'title' || screen === 'select') draw(); }).catch(() => fail('パンの3D素材を読み込めませんでした。通信状態を確認して再試行してください。'));
 } catch { fail('この環境では3D描画（WebGL2）を開始できません。Safariを更新するか、対応端末で開いてください。'); }
 
 // Read-only diagnostics for device QA. Sensor raw values are never persisted or transmitted.

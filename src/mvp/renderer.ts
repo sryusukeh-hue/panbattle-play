@@ -5,17 +5,31 @@ import { BREADS, BREAD_IDS, clamp, type BreadId } from './config';
 import { phase, pose, type BattleView, type BattleEvent, type Fighter, type Side } from './battle';
 import { BattleFeedback, ReplayBuffer, damageStage, DAMAGE_DENT, deformVertex, VISUAL_LIMITS, type BattleSound } from './feedback';
 import { SPECIALS, motionTick } from '../shared/specials';
+import { FaceRig, buildFaceTemplate, type FaceTemplate } from './face-rig';
+import { FaceState, copyFace, type FaceFrame, type FaceInput, type Reaction } from './face-state';
 
-interface Model { mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>; positions: Float32Array; normals: Float32Array; colors: Float32Array }
-interface Actor extends Model { stage: number; displayStage: number; dents: THREE.Vector3[]; wornPositions: Float32Array; wornNormals: Float32Array }
+interface Model { mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>; positions: Float32Array; normals: Float32Array; colors: Float32Array; face: FaceTemplate }
+interface Actor extends Model { stage: number; displayStage: number; dents: THREE.Vector3[]; wornPositions: Float32Array; wornNormals: Float32Array;
+  // Face (plans/EXECPLAN-FACE.md): the glued eyes/lids/decal and the expression state.
+  rig: FaceRig; expression: FaceState }
 interface ActorFrame { position: THREE.Vector3Tuple; rotation: THREE.Vector3Tuple; height: number; bend: number; direction: number[]; impact: number; hit: number; stage: number; positions: Float32Array; normals: Float32Array;
   // Special moves: root scale and a golden wind-up glow (replayed with the pose).
-  scale: THREE.Vector3Tuple; glow: number; glowColor: string }
+  scale: THREE.Vector3Tuple; glow: number; glowColor: string;
+  // Resolved expression, copied so the replay shows the same face.
+  face: FaceFrame }
 export type StanceCue = 'ready' | 'locked' | 'recovery' | 'counter' | 'charged';
 interface Crumb { mesh: THREE.Mesh; vx: number; vy: number; vz: number; life: number; rests: boolean }
 interface Accent { mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>; life: number; duration: number; grow?: number; rise?: number; peak?: number }
 type Mark = THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
 const sideSign = (side: Side): number => side === 'player' ? 1 : -1;
+const CAMERA_HOME = new THREE.Vector3(.9, 5.8, 7.1);
+// Face-centred stills: local y of the face and how much closer than the whole-bread framing.
+const FACE_FOCUS: Record<BreadId, number> = { shokupan: .02, francepan: .43, croissant: .18 };
+const THUMB_CLOSE: Record<BreadId, number> = { shokupan: 1.25, francepan: 1.8, croissant: 1.25 };
+const PORTRAIT_CLOSE: Record<BreadId, number> = { shokupan: 1.55, francepan: 2.3, croissant: 1.9 };
+export type Mood = 'calm' | 'ouch' | 'dodge' | 'special';
+const MOODS: readonly Mood[] = ['calm', 'ouch', 'dodge', 'special'];
+const REST: FaceInput = { phase: 'ready', special: false, charging: false, stage: 0, ending: null, look: [.25, .1] };
 // Half-width of the lane a special move sweeps at the defender's line, from the move's attack ellipse (see specialTouching).
 export function dangerHalfWidth(attacker: BreadId, defender: BreadId): number {
   const spec = SPECIALS[attacker], travel = Math.max(...spec.keys.map(k => k.at[2])), gap = Math.abs(2.4 - travel);
@@ -64,6 +78,7 @@ export class TableRenderer {
   // Special stages whose strike visual was shown, per side (attack id + stage mask): each plays once, hit or miss,
   // even when a slow frame skips a whole stage window, and a pause never replays it.
   private flashed: Partial<Record<Side, { id: number; mask: number }>> = {};
+  private portraits: Partial<Record<BreadId, Record<Mood, string>>> = {}; private mood: Mood = 'calm';
   constructor(private canvas: HTMLCanvasElement, fail: (message: string) => void,
     private playSound: (sound: BattleSound, delay?: number, bread?: BreadId) => void = () => {}, private stopSound: () => void = () => {}) {
     this.reducedMotion.addEventListener('change', this.motionChanged);
@@ -198,7 +213,7 @@ export class TableRenderer {
       for (let i = 0; i < colors.length / 3; i++) { colors[i * 3] = original?.getX(i) ?? 1; colors[i * 3 + 1] = original?.getY(i) ?? 1; colors[i * 3 + 2] = original?.getZ(i) ?? 1; }
       geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
       const mesh = new THREE.Mesh(geometry, material);
-      this.templates.set(id, { mesh, positions: new Float32Array(geometry.attributes.position!.array), normals: new Float32Array(geometry.attributes.normal!.array), colors });
+      this.templates.set(id, { mesh, positions: new Float32Array(geometry.attributes.position!.array), normals: new Float32Array(geometry.attributes.normal!.array), colors, face: buildFaceTemplate(id, geometry) });
     }));
   }
   private fit(): void {
@@ -214,15 +229,17 @@ export class TableRenderer {
     if (this.ids === ids) return;
     for (const side of ['player', 'cpu'] as const) {
       const old = this.actors[side];
-      if (old) { this.scene.remove(old.mesh); old.mesh.geometry.dispose(); old.mesh.material.dispose(); }
+      if (old) { this.scene.remove(old.mesh); old.rig.dispose(); old.mesh.geometry.dispose(); old.mesh.material.dispose(); }
       const t = this.templates.get(battle[side].bread);
       if (!t) throw new Error('モデルの読み込みが完了していません。');
       const mesh = new THREE.Mesh(t.mesh.geometry.clone(), t.mesh.material.clone()); mesh.castShadow = true;
-      this.actors[side] = { mesh, positions: t.positions, normals: t.normals, colors: t.colors, stage: 0, displayStage: 0, dents: [], wornPositions: t.positions, wornNormals: t.normals }; this.scene.add(mesh);
+      const rig = new FaceRig(t.face); mesh.add(rig.group);
+      this.actors[side] = { mesh, positions: t.positions, normals: t.normals, colors: t.colors, face: t.face, stage: 0, displayStage: 0, dents: [], wornPositions: t.positions, wornNormals: t.normals,
+        rig, expression: new FaceState(battle[side].bread, side === 'player' ? 11 : 29) }; this.scene.add(mesh);
     }
     this.ids = ids;
   }
-  private actor(f: Fighter, side: Side, time: number): ActorFrame {
+  private actor(f: Fighter, side: Side, time: number, dt: number, other: Fighter): ActorFrame {
     // The result screen shows the breads at rest, not frozen mid-move.
     if (this.ending && (f.attack || f.recoil > 0 || f.hit > 0)) f = { ...f, attack: null, recoil: 0, hit: 0 };
     const m = this.actors[side]!, p = pose(f, side), b = BREADS[f.bread], sp = p.special, calm = this.reducedMotion.matches;
@@ -239,13 +256,16 @@ export class TableRenderer {
       : phase(f) === 'active' ? 1 : Math.max(0, .6 * (1 - (a.age - a.windup - spec.active) / a.recovery * 2.5));
     if (this.ending) {
       const t = (performance.now() - this.ending.start) / 1000, calm = this.reducedMotion.matches;
+      // Every bread ends facing the camera, so the player finally sees their own bread's face.
+      const base = m.mesh.rotation.y, target = Math.atan2(CAMERA_HOME.x - p.x, CAMERA_HOME.z - p.z), turn = Math.atan2(Math.sin(target - base), Math.cos(target - base));
       if (this.ending.winner === side) {
         m.mesh.position.y += calm ? .12 : Math.abs(Math.sin(t * 6.5)) * .32 * (t < 1.6 ? 1 : .45);
-        if (!calm) m.mesh.rotation.y += Math.PI * 2 * Math.min(1, t / .8);
+        m.mesh.rotation.y = base + (calm ? turn : (turn + Math.PI * 2) * (1 - (1 - Math.min(1, t)) ** 3));
       } else if (this.ending.winner !== 'draw') {
-        const fall = calm ? 1 : Math.min(1, t / .5), sway = calm ? 0 : Math.sin(t * 3) * .04;
+        const fall = calm ? 1 : clamp((t - .25) / .5, 0, 1), sway = calm ? 0 : Math.sin(t * 3) * .04 * fall;
+        m.mesh.rotation.y = base + turn * (calm ? 1 : Math.min(1, t / .35));
         m.mesh.rotation.z += (side === 'player' ? -1 : 1) * (.62 * fall + sway); m.mesh.position.y -= .52 * fall;
-      }
+      } else m.mesh.rotation.y = base + turn * (calm ? 1 : Math.min(1, t / .5));
     }
     const stage = damageStage(f.hp, b.hp);
     if (stage !== m.stage) {
@@ -261,8 +281,17 @@ export class TableRenderer {
     // Visual deformation is <= 3 cm; collision stays tied to the same controlled root pose.
     const bend = Math.sin(Math.max(0, p.progress) * Math.PI) * .03 + Math.sin(f.hit * 60) * f.hit * .025;
     const frame: ActorFrame = { position: m.mesh.position.toArray(), rotation: [m.mesh.rotation.x, m.mesh.rotation.y, m.mesh.rotation.z], height: b.height,
-      bend, direction, impact, hit: f.hit, stage, positions: m.wornPositions, normals: m.wornNormals, scale, glow, glowColor: charge ? '#ff5a36' : spec.color };
+      bend, direction, impact, hit: f.hit, stage, positions: m.wornPositions, normals: m.wornNormals, scale, glow, glowColor: charge ? '#ff5a36' : spec.color,
+      face: copyFace(m.expression.update(dt, this.faceInput(f, side, other, charge, stage), calm)) };
     this.drawActor(side, frame); return frame;
+  }
+  // What the face reacts to: action phase, fatigue, result, and where to look (the opponent, or the camera on the result screen).
+  private faceInput(f: Fighter, side: Side, other: Fighter, charging: boolean, stage: number): FaceInput {
+    const m = this.actors[side]!, o = pose(other, side === 'player' ? 'cpu' : 'player'), look = new THREE.Vector3();
+    if (this.ending) look.copy(CAMERA_HOME); else look.set(o.x, o.y, o.z);
+    look.sub(m.mesh.position).applyQuaternion(m.mesh.quaternion.clone().invert()).normalize();
+    const ending = !this.ending ? null : this.ending.winner === 'draw' ? 'draw' : this.ending.winner === side ? 'win' : 'lose';
+    return { phase: this.ending ? 'ready' : phase(f), special: !!f.attack?.special, charging, stage, ending, look: [look.x * 2.2, look.y * 2.2] };
   }
   private drawActor(side: Side, frame: ActorFrame): void {
     const m = this.actors[side]!, { bend, direction, impact, height } = frame;
@@ -284,6 +313,7 @@ export class TableRenderer {
       const len = Math.hypot(nx, ny, nz); normal.setXYZ(i, nx / len, ny / len, nz / len);
     }
     pos.needsUpdate = true; normal.needsUpdate = true;
+    m.rig.update(frame.face, pos, normal);
     if (frame.hit > 0) { m.mesh.material.emissive.set('#d95d27'); m.mesh.material.emissiveIntensity = frame.hit * 1.5; }
     else { m.mesh.material.emissive.set(frame.glow > 0 ? frame.glowColor : '#000000'); m.mesh.material.emissiveIntensity = frame.glow * .8; }
     const shadow = this.shadows[side === 'player' ? 0 : 1]!; shadow.position.x = frame.position[0]; shadow.position.z = frame.position[2];
@@ -292,6 +322,7 @@ export class TableRenderer {
     this.feedback.enqueue(event);
   }
   private accent(event: BattleEvent, battle: BattleView): void {
+    this.faceReaction(event);
     if (event.kind === 'hit' || event.kind === 'clash') {
       for (const side of ['player', 'cpu'] as const) if (event.kind === 'clash' || side !== event.side) this.contacts[side] = new THREE.Vector3(event.x, 1.43, event.z);
     }
@@ -313,6 +344,13 @@ export class TableRenderer {
       this.impacts[side] = { life: .18, direction: new THREE.Vector3(other.x - own.x, 0, other.z - own.z).normalize() };
     }
     for (let i = 0; i < 12; i++) this.crumb(battle[event.kind === 'clash' ? i % 2 ? 'player' : 'cpu' : event.side === 'player' ? 'cpu' : 'player'].bread, event.x, 1.45, event.z, i);
+  }
+  // Expressions: the bread that got hit winces (hit/special-hit name the attacker), a clash grits both, dodge/counter grin.
+  private faceReaction(event: BattleEvent): void {
+    const react = (side: Side, kind: Reaction): void => this.actors[side]?.expression.react(kind);
+    if (event.kind === 'hit' || event.kind === 'special-hit') react(event.side === 'player' ? 'cpu' : 'player', 'ouch');
+    else if (event.kind === 'clash') { react('player', 'grit'); react('cpu', 'grit'); }
+    else if (event.kind === 'dodge' || event.kind === 'counter') react(event.side, event.kind);
   }
   // One crumb of the given bread's material; `power` scales the burst for special moves.
   private crumb(bread: BreadId, x: number, y: number, z: number, i: number, power = 1): void {
@@ -401,7 +439,7 @@ export class TableRenderer {
     this.clearEffects(); this.feedback.reset(newMatch); this.stopSound();
     if (newMatch) {
       this.contacts = {}; this.flashed = {}; this.replay.reset();
-      for (const m of Object.values(this.actors)) { damageGeometry(m.mesh.geometry, m.positions, m.normals, m.colors, 0, []); m.stage = m.displayStage = 0; m.dents = []; m.wornPositions = m.positions; m.wornNormals = m.normals; }
+      for (const m of Object.values(this.actors)) { damageGeometry(m.mesh.geometry, m.positions, m.normals, m.colors, 0, []); m.stage = m.displayStage = 0; m.dents = []; m.wornPositions = m.positions; m.wornNormals = m.normals; m.expression.reset(); }
     }
   }
   startReplay(window = 1.2): boolean { this.resetEffects(); return this.replay.start(this.reducedMotion.matches, window); }
@@ -427,7 +465,11 @@ export class TableRenderer {
       if (feedback.alert) this.playSound('danger', .20);
     }
     this.choose(battle);
-    const player = this.actor(battle.player, 'player', time), cpu = this.actor(battle.cpu, 'cpu', time);
+    // Faces only age while the match runs (online keeps passing real frame time while paused or on the result).
+    const faceDt = active ? dt : 0;
+    const player = this.actor(battle.player, 'player', time, faceDt, battle.cpu), cpu = this.actor(battle.cpu, 'cpu', time, faceDt, battle.player);
+    const face = player.face;
+    this.mood = face.mouth === 'ouch' ? 'ouch' : face.mouth === 'smug' ? 'dodge' : battle.player.attack?.special && !this.ending ? 'special' : 'calm';
     if (active && local && !local.frozen) this.replay.record(dt, { player, cpu });
     this.cameraEffect(dt);
     for (const impact of Object.values(this.impacts)) impact.life = Math.max(0, impact.life - dt);
@@ -522,28 +564,55 @@ export class TableRenderer {
     const p = pose(battle[side], side), v = new THREE.Vector3(p.x, p.y + lift, p.z).project(this.camera);
     return { x: (v.x + 1) / 2 * this.canvas.clientWidth, y: (1 - v.y) / 2 * this.canvas.clientHeight };
   }
-  // Portrait thumbnails from the loaded GLB templates, rendered once with a throwaway context.
-  thumbnails(size = 144): Partial<Record<BreadId, string>> {
-    const result: Partial<Record<BreadId, string>> = {};
-    const canvas = document.createElement('canvas'); canvas.width = canvas.height = size;
-    let renderer: THREE.WebGLRenderer | undefined;
+  // Offscreen stills from the loaded templates, rendered with one throwaway context. Framing centres on the face.
+  private stills(jobs: { bread: BreadId; face: FaceFrame; px: number; close: number }[]): (string | undefined)[] {
+    const result: (string | undefined)[] = [], canvas = document.createElement('canvas');
+    let renderer: THREE.WebGLRenderer | undefined; const rigs: FaceRig[] = [];
     try {
       renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, preserveDrawingBuffer: true });
       renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.15;
       const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(30, 1, .1, 20);
       scene.add(new THREE.HemisphereLight('#fff7df', '#846b50', 2.6));
       const key = new THREE.DirectionalLight('#fff5df', 3.2); key.position.set(-2, 3, 4); scene.add(key);
-      for (const [id, template] of this.templates) {
-        const mesh = new THREE.Mesh(template.mesh.geometry, template.mesh.material);
-        mesh.rotation.set(-.25, Math.PI + .5, id === 'francepan' ? -.65 : 0); scene.add(mesh);
-        const radius = new THREE.Box3().setFromObject(mesh).getBoundingSphere(new THREE.Sphere()).radius;
-        camera.position.set(0, 0, radius / Math.sin(THREE.MathUtils.degToRad(15)) * .78); camera.lookAt(0, 0, 0);
-        renderer.clear(); renderer.render(scene, camera); result[id] = canvas.toDataURL('image/png'); scene.remove(mesh);
+      for (const { bread, face, px, close } of jobs) {
+        const template = this.templates.get(bread);
+        if (!template) { result.push(undefined); continue; }
+        renderer.setSize(px, px, false);
+        const mesh = new THREE.Mesh(template.mesh.geometry, template.mesh.material), rig = new FaceRig(template.face), geometry = template.mesh.geometry; mesh.add(rig.group); rigs.push(rig);
+        rig.update(face, geometry.attributes.position!, geometry.attributes.normal!);
+        mesh.rotation.set(-.12, .18, bread === 'francepan' ? -.28 : 0); scene.add(mesh); mesh.updateMatrixWorld(true);
+        const radius = new THREE.Box3().setFromObject(mesh).getBoundingSphere(new THREE.Sphere()).radius, target = mesh.localToWorld(new THREE.Vector3(0, FACE_FOCUS[bread], 0));
+        camera.position.set(target.x, target.y, target.z + radius / Math.sin(THREE.MathUtils.degToRad(15)) * .78 / close); camera.lookAt(target);
+        renderer.clear(); renderer.render(scene, camera); scene.remove(mesh);
+        result.push(canvas.toDataURL('image/png'));
       }
-    } catch { /* Thumbnails are optional; the menu falls back to emoji. */ }
-    finally { renderer?.dispose(); renderer?.forceContextLoss(); }
+    } catch { /* Stills are optional; the menu falls back to emoji and the HUD hides the portrait. */ }
+    finally { for (const rig of rigs) rig.dispose(); renderer?.dispose(); renderer?.forceContextLoss(); }
     return result;
   }
+  // Menu / cut-in thumbnails with the resting face.
+  thumbnails(size = 144): Partial<Record<BreadId, string>> {
+    const ids = [...this.templates.keys()], shots = this.stills(ids.map(bread => ({ bread, face: new FaceState(bread).update(0, REST, true), px: size, close: THUMB_CLOSE[bread] })));
+    const result: Partial<Record<BreadId, string>> = {};
+    ids.forEach((id, i) => { if (shots[i]) result[id] = shots[i]; });
+    return result;
+  }
+  // Draws the four HUD close-ups for one bread, once. Call it only from menus (after loading, when a bread is picked):
+  // it blocks for a moment, which mid-match would trip the long-frame pause.
+  preparePortraits(bread: BreadId): void {
+    if (!this.portraits[bread] && this.templates.has(bread)) {
+      const faces = MOODS.map(mood => {
+        const state = new FaceState(bread); state.update(0, REST, true);
+        if (mood === 'ouch' || mood === 'dodge') state.react(mood);
+        return state.update(.01, mood === 'special' ? { ...REST, phase: 'active', special: true } : REST, true);
+      });
+      const shots = this.stills(faces.map(face => ({ bread, face, px: 96, close: PORTRAIT_CLOSE[bread] })));
+      this.portraits[bread] = Object.fromEntries(MOODS.map((mood, i) => [mood, shots[i] ?? ''])) as Record<Mood, string>;
+    }
+  }
+  // HUD face close-up for the player's current mood; undefined until preparePortraits() drew it (never drawn here).
+  portrait(bread: BreadId, mood: Mood): string | undefined { return this.portraits[bread]?.[mood] || undefined; }
+  playerMood(): Mood { return this.mood; }
   noteLatency(ms: number): void { if (Number.isFinite(ms) && ms >= 0) this.latencies.push(ms); }
   resetMetrics(): void { this.frames = []; this.latencies = []; this.ending = null; this.resetEffects(true); }
   projectedBounds(): Record<string, { left: number; right: number; top: number; bottom: number }> {
@@ -568,5 +637,5 @@ export class TableRenderer {
       maxAttackMs: this.latencies.length ? Math.max(...this.latencies) : 0, attackSamples: this.latencies.length, frames: values.length,
       drawCalls: this.renderer.info.render.calls, triangles: this.renderer.info.render.triangles };
   }
-  dispose(): void { this.resetEffects(true); this.reducedMotion.removeEventListener('change', this.motionChanged); this.resize.disconnect(); this.renderer.dispose(); }
+  dispose(): void { for (const m of Object.values(this.actors)) { m.rig.dispose(); m.mesh.geometry.dispose(); m.mesh.material.dispose(); } this.actors = {}; this.ids = ''; this.resetEffects(true); this.reducedMotion.removeEventListener('change', this.motionChanged); this.resize.disconnect(); this.renderer.dispose(); }
 }
