@@ -196,6 +196,16 @@ function paintMouth(c: CanvasRenderingContext2D, bread: BreadId, face: FaceFrame
         c.beginPath(); c.ellipse(cx, cy + droop * .3, w * .42, h * .6, 0, 0, Math.PI * 2); lip(FACE_COLORS.lip);
         c.beginPath(); c.ellipse(cx, cy + droop * .3, w * .13, h * .2, 0, 0, Math.PI * 2); dark();
         c.fillStyle = 'rgba(255,240,235,.45)'; c.beginPath(); c.ellipse(cx - w * .16, cy + h * .3, w * .12, h * .1, -.4, 0, Math.PI * 2); c.fill();
+      } else if (bread === 'melonpan' || bread === 'creampan') {
+        // A small even smile; the cream pan's is wider and open.
+        const open = bread === 'creampan';
+        c.beginPath(); c.moveTo(cx - w * (open ? .8 : .5), cy - h * .2 + droop); c.quadraticCurveTo(cx, cy + h * (open ? 1.2 : .7), cx + w * (open ? .8 : .5), cy - h * .2 + droop);
+        if (open) { c.quadraticCurveTo(cx, cy + h * .15, cx - w * .8, cy - h * .2 + droop); dark(); }
+        else { c.strokeStyle = FACE_COLORS.line; c.lineWidth = .012 * LINE_BOOST * S; c.stroke(); }
+      } else if (bread === 'currypan') {
+        // Cocky smirk, one corner up.
+        c.beginPath(); c.moveTo(cx - w * .6, cy + h * .15 + droop); c.quadraticCurveTo(cx + w * .05, cy + h * .55, cx + w * .7, cy - h * .5 + droop * .4);
+        c.strokeStyle = FACE_COLORS.line; c.lineWidth = .013 * LINE_BOOST * S; c.stroke();
       } else {
         // Crooked grin with a single tooth.
         c.beginPath(); c.moveTo(cx - w * .75, cy - h * .25 + droop); c.quadraticCurveTo(cx - w * .1, cy + h * 1.05, cx + w * .8, cy - h * .55 + droop); c.quadraticCurveTo(cx, cy - h * .05, cx - w * .75, cy - h * .25 + droop); dark();
@@ -209,7 +219,8 @@ function paintMouth(c: CanvasRenderingContext2D, bread: BreadId, face: FaceFrame
       // The croissant keeps its single tooth even mid-swing.
       if (bread === 'croissant') { c.beginPath(); c.ellipse(cx, cy, w * .6, h * .6, 0, 0, Math.PI * 2); dark(); teeth(cx - .0175 * S, cy - h * .6, .035 * S, .023 * S); }
       else if (bread === 'francepan') { c.beginPath(); c.ellipse(cx, cy, w * .4, h * .75, 0, 0, Math.PI * 2); lip(FACE_COLORS.lip); c.beginPath(); c.ellipse(cx, cy, w * .2, h * .45, 0, 0, Math.PI * 2); dark(); }
-      else lips(cx, cy, w * .45, h * .9, -h * .3);
+      else if (bread === 'shokupan') lips(cx, cy, w * .45, h * .9, -h * .3);
+      else { c.beginPath(); c.ellipse(cx, cy, w * (bread === 'creampan' ? .55 : .45), h * .7, 0, 0, Math.PI * 2); dark(); }
       break;
     case 'slack':
       c.beginPath(); c.ellipse(cx, cy + droop * .5, w * .3, h * .35, .1, 0, Math.PI * 2); dark(); break;

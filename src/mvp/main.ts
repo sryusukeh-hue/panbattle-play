@@ -54,7 +54,14 @@ input.sensor.attackSensitivity = save.data.attackSensitivity;
 input.sensor.tiltSensitivity = save.data.tiltSensitivity;
 input.bindSpecial(specialButton);
 const modes: Record<Mode, string> = { sensor: '振る・傾ける', touch: 'タッチ', keyboard: 'キーボード' };
-const emoji: Record<BreadId, string> = { shokupan: '🍞', francepan: '🥖', croissant: '🥐' };
+const emoji: Record<BreadId, string> = { shokupan: '🍞', francepan: '🥖', croissant: '🥐', melonpan: '🍈', currypan: '🍛', creampan: '🧤' };
+// One-word role on each selection card, and how to dodge that bread's special (shown for the opponent you pick).
+const role: Record<BreadId, string> = { shokupan: 'バランス', francepan: 'ながい', croissant: '出がはやい', melonpan: 'よけてチャージ', currypan: '一発ドカン', creampan: '戻りがはやい' };
+// Written so the screen alone tells you what to do: the same line is the practice drill's instruction.
+const dodgeTip: Record<BreadId, string> = {
+  shokupan: '赤い四角の外へ！ 大きく横へ逃げよう', francepan: '赤い線の外へ！ 横へ逃げよう', croissant: '赤い三日月が消えるまで、横で待とう',
+  melonpan: '赤い輪の外へ！ 輪が消えるまで、戻らず待とう', currypan: '赤い輪の外へ！ 丸が2つとも消えるまで、戻らず待とう', creampan: '横にはらうよ！ 矢印だけでなく、赤い輪の外まで逃げよう',
+};
 const button = (action: string, label: string, secondary = false): string => `<button data-action="${action}" class="${secondary ? 'secondary' : 'primary'}">${label}</button>`;
 const header = (eyebrow: string, title: string, description = ''): string => `<div class="eyebrow">${eyebrow}</div><h1>${title}</h1>${description ? `<p>${description}</p>` : ''}`;
 const RAGE_TIP = 'CPUのゲージが一気にたまる！ ひっさつに注意';
@@ -77,7 +84,7 @@ function showCutin(who: Side | 'both', seek = 0): void {
   const sides: Side[] = who === 'both' ? ['player', 'cpu'] : [who], left = Math.max(0, CUTIN_SECONDS - seek);
   const band = (side: Side): string => {
     const bread = battle[side].bread, spec = SPECIALS[bread];
-    return `<div class="cutin-band ${side}"><div class="cutin-portrait">${thumbs[bread] ? `<img src="${thumbs[bread]}" alt="">` : emoji[bread]}</div><div class="cutin-text"><small>${side === 'player' ? 'YOU' : 'CPU'} · ひっさつ！</small><strong><b>${spec.kicker}</b>${spec.title}</strong><span>${spec.ruby}</span>${side === 'cpu' ? '<em>横へ回避！</em>' : ''}</div></div>`;
+    return `<div class="cutin-band ${side}"><div class="cutin-portrait">${thumbs[bread] ? `<img src="${thumbs[bread]}" alt="">` : emoji[bread]}</div><div class="cutin-text"><small>${side === 'player' ? 'YOU' : 'CPU'} · ひっさつ！</small><strong><b>${spec.kicker}</b>${spec.title}</strong>${spec.ruby === spec.name ? '' : `<span>${spec.ruby}</span>`}${side === 'cpu' ? '<em>横へ回避！</em>' : ''}</div></div>`;
   };
   // The move name is the only big notice during the move: the CPU rage banner and its gauge tip end here, so the face stays visible.
   if (bannerElement.classList.contains('rage')) bannerElement.className = '';
@@ -194,7 +201,7 @@ function draw(): void {
   } else if (screen === 'calibrate') {
     html = `<section class="sheet">${header('02 / READY', 'いつもの持ち方で', input.mode === 'sensor' ? 'iPhoneを縦に構え、楽な角度で止めてください。<br>この位置を左右移動の中央にします。' : input.mode === 'keyboard' ? '← → または A Dで横移動。<br>Space / Zで攻撃。Escapeで一時停止。' : '左・右ボタンを押している間、横に移動。<br>中央の攻撃ボタンは、1タップで1回。')}<div class="calibration-icon">↔</div><p id="sensor-status" class="status-box"></p>${button('calibrated', 'この位置で開始')}${button('permission', '操作方式を選び直す', true)}<p class="error-text" id="calibration-message" role="status"></p></section>`;
   } else if (screen === 'select') {
-    html = `<section class="sheet selection">${header('03 / CHOOSE YOUR BREAD', '今日のパンは？', '3種類とも、最初から遊べます。')}<div class="bread-list">${BREAD_IDS.map(id => `<button data-bread="${id}" aria-pressed="${save.data.bread === id}" class="bread-card">${thumbs[id] ? `<img class="bread-thumb" src="${thumbs[id]}" alt="">` : `<span class="bread-emoji">${emoji[id]}</span>`}<span class="bread-info"><b>${BREADS[id].name}</b><small>${BREADS[id].note}</small>${abilities(id)}</span><i>${save.data.bread === id ? '✓' : ''}</i></button>`).join('')}</div><label class="opponent">対戦相手<select id="opponent">${BREAD_IDS.map(id => `<option value="${id}" ${save.data.cpu === id ? 'selected' : ''}>${BREADS[id].name}</option>`).join('')}</select></label><div class="difficulty" role="group" aria-label="CPUの強さ"><span>CPUの強さ</span>${DIFFICULTIES.map(d => `<button data-difficulty="${d}" aria-pressed="${level() === d}">${DIFFICULTY[d].label}</button>`).join('')}</div><p class="minor">${DIFFICULTY[level()].label}CPU · ${modes[input.mode]} · 60秒${level() === 'gentle' ? '' : ' · 相手も回避します'}</p>${button('start', practiceRequested || !save.data.practiced ? 'まずは短い練習へ →' : '対戦をはじめる →')}${save.data.practiced && !save.data.practicedSpecial && !practiceRequested ? button('special-practice', 'NEW! ひっさつだけ練習する', true) : ''}<div class="button-pair">${button('calibration', '構えを再調整', true)}${button('title', 'タイトルへ', true)}</div></section>`;
+    html = `<section class="sheet selection">${header('03 / CHOOSE YOUR BREAD', '今日のパンは？', '6種類とも、最初から遊べます。')}<div class="bread-grid">${BREAD_IDS.map(id => `<button data-bread="${id}" aria-pressed="${save.data.bread === id}" class="bread-card">${thumbs[id] ? `<img class="bread-thumb" src="${thumbs[id]}" alt="">` : `<span class="bread-emoji">${emoji[id]}</span>`}<b>${BREADS[id].name}</b><small>${role[id]}</small><i>${save.data.bread === id ? '✓' : ''}</i></button>`).join('')}</div><div class="bread-detail" id="bread-detail"><b>${BREADS[save.data.bread].name}</b><small>${BREADS[save.data.bread].note}</small>${abilities(save.data.bread)}<span class="bread-special">ひっさつ<b>${SPECIALS[save.data.bread].name}</b></span></div><label class="opponent">対戦相手<select id="opponent">${BREAD_IDS.map(id => `<option value="${id}" ${save.data.cpu === id ? 'selected' : ''}>${BREADS[id].name}</option>`).join('')}</select></label><p class="minor opponent-tip" id="opponent-tip">相手のひっさつ「${SPECIALS[save.data.cpu].name}」<br>${dodgeTip[save.data.cpu]}</p><div class="difficulty" role="group" aria-label="CPUの強さ"><span>CPUの強さ</span>${DIFFICULTIES.map(d => `<button data-difficulty="${d}" aria-pressed="${level() === d}">${DIFFICULTY[d].label}</button>`).join('')}</div><p class="minor">${DIFFICULTY[level()].label}CPU · ${modes[input.mode]} · 60秒${level() === 'gentle' ? '' : ' · 相手も回避します'}</p>${button('start', practiceRequested || !save.data.practiced ? 'まずは短い練習へ →' : '対戦をはじめる →')}${save.data.practiced && !save.data.practicedSpecial && !practiceRequested ? button('special-practice', 'NEW! ひっさつだけ練習する', true) : ''}<div class="button-pair">${button('calibration', '構えを再調整', true)}${button('title', 'タイトルへ', true)}</div></section>`;
   } else if (screen === 'practice-intro') {
     html = `<section class="sheet">${header('WARM UP', '4つ試せば、準備OK', '練習ではHPが減りません。失敗しても大丈夫。')}<ol class="practice-list"><li>攻撃を当てる</li><li>予告を見て、横に避ける</li><li>避けた後の隙に、反撃を当てる</li><li>ゲージMAXで「ひっさつ」を当てる</li></ol>${button('practice-start', '練習をはじめる')}${button('skip', '練習をスキップして対戦', true)}</section>`;
   } else if (screen === 'practice-done') {
@@ -233,13 +240,16 @@ function scoreRow(name: string, key: keyof Scores): string {
 }
 const escapeHtml = (text: string): string => text.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 function stat(label: string, value: string): string { return `<div class="stat"><small>${label}</small><b>${value}</b></div>`; }
-// 1-5 pips relative to the other breads, derived from the combat table so it never drifts from the rules.
+// 1-5 pips derived from the combat table so it never drifts from the rules. The ranges are fixed, so adding a bread
+// never changes what the others show.
 function abilities(id: BreadId): string {
-  const scale = (pick: (b: typeof BREADS[BreadId]) => number, invert = false): number => {
-    const values = BREAD_IDS.map(key => pick(BREADS[key])), lo = Math.min(...values), hi = Math.max(...values), t = hi === lo ? .5 : (pick(BREADS[id]) - lo) / (hi - lo);
+  const b = BREADS[id], scale = (value: number, lo: number, hi: number, invert = false): number => {
+    const t = Math.max(0, Math.min(1, (value - lo) / (hi - lo)));
     return 1 + Math.round(4 * (invert ? 1 - t : t));
   };
-  const rows: [string, number][] = [['パワー', scale(b => b.damage)], ['出の速さ', scale(b => b.windup, true)], ['戻りの速さ', scale(b => b.recovery, true)], ['当てやすさ', scale(b => b.width)]];
+  // How far the swing's leading edge gets at full lean.
+  const forward = b.reach + Math.hypot(b.height * Math.sin(b.lean), b.depth * Math.cos(b.lean));
+  const rows: [string, number][] = [['パワー', scale(b.damage, 12, 26)], ['出の速さ', scale(b.windup, .12, .30, true)], ['戻りの速さ', scale(b.recovery, .28, .80, true)], ['横の広さ', scale(b.width, .20, .65)], ['とどく長さ', scale(forward, 2.24, 2.67)]];
   return `<span class="abilities">${rows.map(([name, n]) => `<span><em>${name}</em><span class="pips" role="img" aria-label="${name} ${n}/5">${'<i class="on"></i>'.repeat(n)}${'<i></i>'.repeat(5 - n)}</span></span>`).join('')}</span>`;
 }
 function metricsText(): string {
@@ -305,7 +315,7 @@ function updateHud(): void {
         (tip as HTMLElement).dataset.stage = key;
         const special = practiceStage === PRACTICE_SPECIAL_STAGE;
         const dodge = special && battle.specialStep === 'dodge';
-        tip.innerHTML = `<b>${practiceStage + 1} / 4　${['まずは、攻撃を当てよう', '相手が引いたら、横に避けよう', '避けた隙に、すぐ反撃しよう', dodge ? 'CPUのひっさつを見切ろう！' : 'ゲージMAX！ ひっさつを当てよう'][practiceStage] ?? ''}</b><span>${dodge ? '赤い範囲が出たら、大きく横へ逃げよう' : special ? `${input.mode === 'keyboard' ? 'Xキー' : '光る「ひっさつ」ボタン'}で発動 · 練習用に満タン` : input.mode === 'sensor' ? '軽く振る → 攻撃 / 左右に傾ける → 回避' : input.mode === 'touch' ? '左右を押して回避 / 中央ボタンで攻撃' : '← →で回避 / Spaceで攻撃'}</span><button data-action="skip">練習をスキップ</button>`;
+        tip.innerHTML = `<b>${practiceStage + 1} / 4　${['まずは、攻撃を当てよう', '相手が引いたら、横に避けよう', '避けた隙に、すぐ反撃しよう', dodge ? 'CPUのひっさつを見切ろう！' : 'ゲージMAX！ ひっさつを当てよう'][practiceStage] ?? ''}</b><span>${dodge ? dodgeTip[battle.cpu.bread] : special ? `${input.mode === 'keyboard' ? 'Xキー' : '光る「ひっさつ」ボタン'}で発動 · 練習用に満タン` : input.mode === 'sensor' ? '軽く振る → 攻撃 / 左右に傾ける → 回避' : input.mode === 'touch' ? '左右を押して回避 / 中央ボタンで攻撃' : '← →で回避 / Spaceで攻撃'}</span><button data-action="skip">練習をスキップ</button>`;
       }
     } else {
       const text = input.mode === 'sensor' ? '軽く振って攻撃 · 傾けて回避' : input.mode === 'keyboard' ? '← →：回避　Space：攻撃　X：ひっさつ' : '押して移動 · 離すと中央へ';
@@ -395,7 +405,8 @@ app.addEventListener('click', e => {
 });
 app.addEventListener('change', e => {
   const element = e.target as HTMLInputElement;
-  if (element.id === 'opponent') { if (!BREAD_IDS.includes(element.value as BreadId)) return; save.data.cpu = element.value as BreadId; battle = new Battle(save.data.bread, save.data.cpu); }
+  if (element.id === 'opponent') { if (!BREAD_IDS.includes(element.value as BreadId)) return; save.data.cpu = element.value as BreadId; battle = new Battle(save.data.bread, save.data.cpu);
+    const tip = document.querySelector('#opponent-tip'); if (tip) tip.innerHTML = `相手のひっさつ「${SPECIALS[save.data.cpu].name}」<br>${dodgeTip[save.data.cpu]}`; }
   else if (element.id === 'sound') { save.data.sound = element.checked; if (!element.checked) audio.silence(); audio.unlock(); }
   else if (element.id === 'music') save.data.music = element.checked;
   else if (element.id === 'attackSensitivity' || element.id === 'tiltSensitivity') {

@@ -1,8 +1,9 @@
 import { test, expect, type Page } from '@playwright/test';
 
 // Browser time is fake: the cut-in, wind-up and hits are stepped with page.clock so every screenshot lands on a known moment.
-const NAMES = { shokupan: '爆熱ギガトースト', francepan: '雷光バゲットブレイカー', croissant: '三日月トルネード' } as const;
-const DAMAGE = { shokupan: 32, francepan: 36, croissant: 28 } as const;
+const NAMES = { shokupan: '爆熱ギガトースト', francepan: '雷光バゲットブレイカー', croissant: '三日月トルネード', melonpan: 'ころころメロンローラー', currypan: '二度揚げカレーボンバー', creampan: 'ふわっとクリームパーン' } as const;
+const DAMAGE = { shokupan: 32, francepan: 36, croissant: 28, melonpan: 26, currypan: 34, creampan: 28 } as const;
+const BREADS = Object.keys(NAMES) as (keyof typeof NAMES)[];
 async function start(page: Page, mode: 'キーボード' | 'タッチ操作' = 'キーボード', saved?: object): Promise<void> {
   if (saved) await page.addInitScript(value => localStorage.setItem('panbattle.3d.v1', value), JSON.stringify(saved));
   await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') });
@@ -27,9 +28,10 @@ async function runUntil(page: Page, ready: () => Promise<boolean>, limit = 4000)
 }
 
 test('every bread: X starts the cut-in, time freezes, the move lands its fixed damage and the meter resets', async ({ page }, info) => {
+  test.setTimeout(90_000); // all six specials in one match
   const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
   await start(page); await fight(page);
-  for (const bread of ['shokupan', 'francepan', 'croissant'] as const) {
+  for (const bread of BREADS) {
     await page.evaluate(bread => {
       const b = window.__panTest.battle; b.cpuEnabled = false; b.player.bread = bread;
       b.player.hp = b.cpu.hp = 100; b.player.x = b.cpu.x = 0; b.player.attack = b.cpu.attack = null; b.player.recoil = b.cpu.recoil = 0; b.player.meter = 100;

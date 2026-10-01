@@ -1,6 +1,8 @@
 import { defineConfig } from 'vitest/config';
 import { readFileSync } from 'node:fs';
 
+// Keep in step with BREADS in src/shared/rules.ts (scripts/check-size.mjs checks each model reached the output).
+const BREADS = ['shokupan', 'francepan', 'croissant', 'melonpan', 'currypan', 'creampan'];
 export default defineConfig({
   base: '/panbattle-play/',
   build: {
@@ -12,7 +14,7 @@ export default defineConfig({
     rollupOptions: { output: { manualChunks: { three: ['three', 'three/addons/loaders/GLTFLoader.js'] } } },
   },
   plugins: [{ name: 'mvp-assets', generateBundle() {
-    for (const name of ['shokupan', 'francepan', 'croissant']) this.emitFile({ type: 'asset', fileName: `assets/models/${name}.glb`, source: readFileSync(`public/assets/models/${name}.glb`) });
+    for (const name of BREADS) this.emitFile({ type: 'asset', fileName: `assets/models/${name}.glb`, source: readFileSync(`public/assets/models/${name}.glb`) });
     this.emitFile({ type: 'asset', fileName: 'sw.js', source: readFileSync('scripts/retire-sw.js') });
   } }],
   test: {

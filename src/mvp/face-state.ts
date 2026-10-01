@@ -43,8 +43,20 @@ const RESULT: Record<BreadId, Record<'win' | 'lose' | 'draw', Partial<FaceFrame>
   shokupan: { win: { eyes: 'happy', mouth: 'win', cheek: 1, brow: 'worry' }, lose: { eyes: 'shut', mouth: 'lose', brow: 'worry' }, draw: { mouth: 'huh', brow: 'worry' } },
   francepan: { win: { open: [.35, .75], mouth: 'smug', brow: 'up' }, lose: { eyes: 'shut', mouth: 'lose', brow: 'worry' }, draw: { mouth: 'huh', brow: 'up' } },
   croissant: { win: { eyes: 'happy', mouth: 'win', cheek: .8 }, lose: { eyes: 'shut', mouth: 'lose', brow: 'worry' }, draw: { mouth: 'huh' } },
+  melonpan: { win: { eyes: 'happy', mouth: 'win', cheek: .8, brow: 'none' }, lose: { eyes: 'shut', mouth: 'lose', brow: 'worry' }, draw: { mouth: 'huh', brow: 'worry' } },
+  currypan: { win: { open: [.75, .75], mouth: 'smug', brow: 'up', cheek: .4 }, lose: { open: [.35, .55], mouth: 'lose', brow: 'worry' }, draw: { mouth: 'huh', brow: 'up' } },
+  creampan: { win: { eyes: 'happy', mouth: 'win', cheek: 1, brow: 'up' }, lose: { eyes: 'shut', mouth: 'lose', brow: 'worry', cheek: .3 }, draw: { mouth: 'huh', brow: 'worry' } },
 };
-const ATTACK_BROW: Record<BreadId, BrowId> = { shokupan: 'worry', francepan: 'angry', croissant: 'angry' };
+const ATTACK_BROW: Record<BreadId, BrowId> = { shokupan: 'worry', francepan: 'angry', croissant: 'angry', melonpan: 'worry', currypan: 'angry', creampan: 'up' };
+// Face while a special winds up and strikes.
+const SPECIAL_FACE: Record<BreadId, Partial<FaceFrame>> = {
+  shokupan: { open: [.9, .9], mouth: 'serious', brow: 'none', pupil: .6, cheek: 0 },
+  francepan: { open: [1, 1], pop: 1.15, mouth: 'attack', brow: 'angry', pupil: .75 },
+  croissant: { open: [1, .85], mouth: 'wild', brow: 'angry', cheek: .8 },
+  melonpan: { open: [.95, .95], mouth: 'serious', brow: 'none', pupil: .75 },
+  currypan: { open: [1, 1], mouth: 'wild', brow: 'angry', cheek: .4 },
+  creampan: { open: [1, 1], mouth: 'win', brow: 'up', cheek: .8 },
+};
 
 export class FaceState {
   private clock = 0; private next = 0; private blinkAt = -1;
@@ -82,11 +94,8 @@ export class FaceState {
     if (stage >= 1 && frame.brow === 'none') frame.brow = 'worry';
     // Action phase.
     if (input.charging) { frame.open = [.8, .8]; frame.mouth = 'tight'; frame.brow = 'angry'; frame.pupil = .85; }
-    else if (input.special && (phase === 'windup' || phase === 'active')) {
-      if (this.bread === 'shokupan') { frame.open = [.9, .9]; frame.mouth = 'serious'; frame.brow = 'none'; frame.pupil = .6; frame.cheek = 0; }
-      else if (this.bread === 'francepan') { frame.open = [1, 1]; frame.pop = 1.15; frame.mouth = 'attack'; frame.brow = 'angry'; frame.pupil = .75; }
-      else { frame.open = [1, .85]; frame.mouth = 'wild'; frame.brow = 'angry'; frame.cheek = .8; }
-    } else if (phase === 'windup') { frame.open = [Math.max(.6, spec.open[0] * .8), Math.max(.6, spec.open[1] * .8)]; frame.mouth = 'tight'; frame.brow = ATTACK_BROW[this.bread]; }
+    else if (input.special && (phase === 'windup' || phase === 'active')) { const face = SPECIAL_FACE[this.bread]; Object.assign(frame, face, { open: [...face.open!] }); }
+    else if (phase === 'windup') { frame.open = [Math.max(.6, spec.open[0] * .8), Math.max(.6, spec.open[1] * .8)]; frame.mouth = 'tight'; frame.brow = ATTACK_BROW[this.bread]; }
     else if (phase === 'active') { frame.open = [1, 1]; frame.mouth = 'attack'; frame.brow = ATTACK_BROW[this.bread]; }
     else if (phase === 'recovery') { frame.open = [frame.open[0] * .85, frame.open[1] * .85]; frame.mouth = 'slack'; }
     // Short reactions: full-face shock for a moment, then only the mouth lingers (and only while not attacking).

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { BREAD_IDS, BREADS, LIMIT, STEP, type BreadId } from './rules';
 import { createBattle, stepBattle, startAttack, startSpecial, canSpecial, pose, phase, specialTouching, otherSlot, SLOTS, type BattleState, type BattleEvent, type Commands } from './battle';
-import { SPECIALS, METER_GAIN, METER_MAX, specialFrame, specialDuration, motionTime, liveStage } from './specials';
+import { SPECIALS, METER_GAIN, METER_MAX, specialFrame, specialDuration, dodgeGain, motionTime, liveStage } from './specials';
 
 const still = (s: BattleState): Commands => ({ A: { target: s.fighters.A.x, attack: false }, B: { target: s.fighters.B.x, attack: false } });
 function run(s: BattleState, seconds: number, commands = still(s), events: BattleEvent[] = []): void {
@@ -32,7 +32,7 @@ describe('special move data', () => {
     }
   });
   it('damage is 32 / 36 / 6+6+16 and a CPU wind-up stretch keeps active and recovery timing', () => {
-    expect(BREAD_IDS.map(total)).toEqual([32, 36, 28]);
+    expect(BREAD_IDS.map(total)).toEqual([32, 36, 28, 26, 34, 28]);
     expect(SPECIALS.croissant.stages.map(s => s.damage)).toEqual([6, 6, 16]);
     expect(motionTime('shokupan', .70 + .35, .35)).toBeCloseTo(.70);
     expect(motionTime('shokupan', .525, .35)).toBeCloseTo(.35);
@@ -143,7 +143,7 @@ describe('special hits and dodges', () => {
       }
       expect(s.fighters[other].hp).toBe(100);
       expect(s.scores[other].dodge).toEqual({ success: 1, opportunities: 1 });
-      expect(s.fighters[other].meter).toBe(METER_GAIN.dodge);
+      expect(s.fighters[other].meter).toBe(dodgeGain(s.fighters[other].bread));
       expect(events.some(e => e.kind === 'dodge' && e.side === other && e.special)).toBe(true);
       expect(events.some(e => e.kind === 'miss' && e.side === slot && e.special)).toBe(true);
     }

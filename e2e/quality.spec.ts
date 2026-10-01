@@ -12,8 +12,9 @@ async function start(page: Page): Promise<void> {
 }
 
 test('damage, anticipation, crumbs and rematch stay visual and reset for every bread', async ({ page }, info) => {
+  test.setTimeout(90_000); // six breads in one scenario
   await start(page);
-  for (const bread of ['shokupan', 'francepan', 'croissant']) {
+  for (const bread of ['shokupan', 'francepan', 'croissant', 'melonpan', 'currypan', 'creampan']) {
     const result = await page.evaluate(bread => {
       const { battle: b, renderer: r } = window.__panTest;
       b.cpuEnabled = false; b.advance = () => {}; b.player.bread = b.cpu.bread = bread;
@@ -149,7 +150,7 @@ test('difficulty, damage numbers, rank and title sound toggle', async ({ page },
   await page.getByRole('button', { name: '食卓で勝負する →' }).click();
   await page.getByText('補助操作で遊ぶ', { exact: true }).click(); await page.getByRole('button', { name: 'キーボード', exact: true }).click();
   await page.getByRole('button', { name: 'この位置で開始' }).click();
-  await expect(page.locator('.bread-thumb')).toHaveCount(3);
+  await expect(page.locator('.bread-thumb')).toHaveCount(6);
   await page.getByRole('button', { name: 'つよい' }).click();
   await expect(page.getByRole('button', { name: 'つよい' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByText('つよいCPU · キーボード · 60秒 · 相手も回避します')).toBeVisible();

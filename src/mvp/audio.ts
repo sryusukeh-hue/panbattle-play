@@ -2,7 +2,7 @@ import type { BattleSound } from './feedback';
 import { BREAD_IDS, type BreadId } from './config';
 import { CUES, TEMPO, frequencyOf, notesAt, type Cue } from './music';
 
-const breadTone = { shokupan: [1, 650], francepan: [.72, 1400], croissant: [1.35, 2300] } as const;
+const breadTone: Record<BreadId, readonly [number, number]> = { shokupan: [1, 650], francepan: [.72, 1400], croissant: [1.35, 2300], melonpan: [.92, 1800], currypan: [.82, 3400], creampan: [1.18, 850] };
 export async function loadHitSound(audio: Pick<AudioContext, 'decodeAudioData'>, bread: BreadId): Promise<AudioBuffer | null> {
   for (const extension of ['m4a', 'mp3']) {
     try {
@@ -24,9 +24,11 @@ const tones: Record<Exclude<BattleSound, SpecialSound>, [number, number, number,
 // Special voices (EXECPLAN-SPECIAL 5.5): signature rise before the major-triad sparkle, and the landing thud.
 const specialRise: Record<BreadId, [number[], number, number]> = {
   shokupan: [[180, 360], .22, 523.25], francepan: [[500, 1400], .20, 659.25], croissant: [[700, 950, 1200], .21, 783.99],
+  melonpan: [[240, 360, 480], .21, 587.33], currypan: [[220, 440, 880], .21, 392.00], creampan: [[440, 660], .20, 698.46],
 };
 const specialLand: Record<BreadId, [number, number, number, number]> = {
   shokupan: [120, 45, .18, 650], francepan: [220, 65, .12, 5200], croissant: [160, 60, .16, 2300],
+  melonpan: [145, 55, .17, 1800], currypan: [180, 45, .18, 3400], creampan: [190, 75, .14, 850],
 };
 const MUSIC_LEVEL = .16;
 export class BattleAudio {

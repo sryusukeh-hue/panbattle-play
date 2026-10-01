@@ -42,6 +42,25 @@ export const FACES: Record<BreadId, FaceSpec> = {
     region: { x0: -.36, x1: .36, y0: 0, y1: .45 }, lid: '#d08a3a', brow: 'none', cheek: .25,
     sweat: { x: .27, y: .3, r: .03 }, tired: [.72, .8],
   },
+  // Calm round face, hot-blooded smirk, beaming smile (plans/EXECPLAN-CHARACTERS.md).
+  melonpan: {
+    eyes: [{ x: -.21, y: .13, radius: [.090, .105, .053] }, { x: .21, y: .13, radius: [.090, .105, .053] }],
+    pupil: .035, open: [.82, .82], mouth: { x: 0, y: -.13, w: .20, h: .10 },
+    region: { x0: -.41, x1: .41, y0: -.32, y1: .36 }, lid: '#e1bd70', brow: 'none', cheek: .35,
+    sweat: { x: .34, y: .18, r: .028 }, tired: [.65, .60],
+  },
+  currypan: {
+    eyes: [{ x: -.17, y: .07, radius: [.083, .090, .045] }, { x: .17, y: .09, radius: [.080, .088, .045] }],
+    pupil: .034, open: [.90, .78], mouth: { x: 0, y: -.11, w: .20, h: .08 },
+    region: { x0: -.34, x1: .34, y0: -.25, y1: .25 }, lid: '#b87936', brow: 'up', cheek: .15,
+    sweat: { x: .29, y: .13, r: .024 }, tired: [.70, .60],
+  },
+  creampan: {
+    eyes: [{ x: -.22, y: .03, radius: [.096, .095, .050] }, { x: .22, y: .04, radius: [.096, .095, .050] }],
+    pupil: .038, open: [1, .96], mouth: { x: 0, y: -.17, w: .24, h: .10 },
+    region: { x0: -.44, x1: .44, y0: -.32, y1: .25 }, lid: '#e6bd82', brow: 'none', cheek: .65,
+    sweat: { x: .36, y: .09, r: .029 }, tired: [.60, .55],
+  },
 };
 // Pupil travel limits as a share of the eyeball's horizontal / vertical radius.
 export const GAZE_LIMIT = { x: .22, y: .15 } as const;

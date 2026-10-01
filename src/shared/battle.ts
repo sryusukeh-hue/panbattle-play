@@ -1,5 +1,5 @@
 import { BREADS, LIMIT, STEP, PVP_WINDUP_EXTRA, PVP_RECOVERY_EXTRA, clamp, mix, type BreadId, type Ruleset } from './rules';
-import { SPECIALS, METER_MAX, METER_GAIN, motionTime, motionTick, liveStage, specialFrame, type SpecialFrame } from './specials';
+import { SPECIALS, METER_MAX, METER_GAIN, dodgeGain, motionTime, motionTick, liveStage, specialFrame, type SpecialFrame } from './specials';
 
 export const SLOTS = ['A', 'B'] as const;
 export type Slot = typeof SLOTS[number];
@@ -55,7 +55,7 @@ export function movable(f: Fighter): boolean {
 function specialPose(f: Fighter, slot: Slot): Pose {
   const b = BREADS[f.bread], a = f.attack!, sign = slot === 'A' ? 1 : -1, t = motionTime(f.bread, a.age, a.special!.extra), frame = specialFrame(f.bread, t);
   const lean = -sign * frame.lean;
-  return { x: mix(f.x, a.aim, frame.alpha), y: 1.43 + frame.lift, z: sign * (1.2 - frame.travel), lean, rx: b.width,
+  return { x: mix(f.x, a.aim, frame.alpha) + sign * frame.side, y: 1.43 + frame.lift, z: sign * (1.2 - frame.travel), lean, rx: b.width,
     rz: Math.sqrt((b.height * Math.sin(lean)) ** 2 + (b.depth * Math.cos(lean)) ** 2), progress: clamp(frame.travel / 1.92, 0, 1), special: { ...frame, t } };
 }
 export function pose(f: Fighter, slot: Slot): Pose {
@@ -191,10 +191,10 @@ export function stepBattle(s: BattleState, commands: Commands, events: BattleEve
           s.scores[opposite].dodge.success++; s.scores[opposite].counter.opportunities++;
           const grace = opposite === 'B' && s.rules !== 'pvp' ? s.cpuExtra?.grace ?? 0 : 0;
           s.counters[opposite] = { until: s.elapsed + a.recovery + grace, available: true };
-          gain(s, opposite, METER_GAIN.dodge);
+          gain(s, opposite, dodgeGain(s.fighters[opposite].bread));
           emit(s, events, 'dodge', opposite, s.fighters[opposite].x, opposite === 'A' ? 1.2 : -1.2, special ? { special } : {});
         }
-      } else if (a.near && !a.spent && moved) gain(s, opposite, METER_GAIN.dodge);
+      } else if (a.near && !a.spent && moved) gain(s, opposite, dodgeGain(s.fighters[opposite].bread));
     }
     if (a.age >= a.windup + active + a.recovery) f.attack = null;
   }

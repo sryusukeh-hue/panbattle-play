@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 
 declare global { interface Window { __panTest: any; __panDiagnostics: () => any } }
+const BREADS = ['shokupan', 'francepan', 'croissant', 'melonpan', 'currypan', 'creampan'];
 async function boot(page: Page): Promise<void> {
   await page.goto('./?test=1'); await expect(page.getByRole('button', { name: '食卓で勝負する →' })).toBeEnabled();
 }
@@ -113,13 +114,14 @@ test('storage failure is visible, settings and result still work', async ({ page
   await skipToResult(page);
   await expect(page.getByRole('button', { name: '同じパンで、もう一戦 →' })).toBeVisible();
 });
-for (const width of [360, 390, 430]) test(`three breads and all opponent combinations render without errors at ${width}px`, async ({ page }, testInfo) => {
+for (const width of [360, 390, 430]) test(`six breads and all opponent combinations render without errors at ${width}px`, async ({ page }, testInfo) => {
+  test.setTimeout(90_000); // 6x6 opponent combinations
   const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
   await boot(page); await page.screenshot({ path: testInfo.outputPath('title.png') }); await select(page);
     await page.setViewportSize({ width, height: 844 });
-    for (const player of ['shokupan', 'francepan', 'croissant']) {
+    for (const player of BREADS) {
       await page.locator(`[data-bread="${player}"]`).click();
-      for (const cpu of ['shokupan', 'francepan', 'croissant']) {
+      for (const cpu of BREADS) {
         await page.locator('#opponent').selectOption(cpu);
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       }
@@ -230,11 +232,12 @@ for (const gravitySign of [-1, 1]) test(`portrait gravity sign ${gravitySign}: p
   await expect(page.locator('#app')).toHaveAttribute('data-screen', 'battle');
 });
 for (const width of [360, 390, 430]) test(`all bread silhouettes stay within portrait view at lateral extremes, attack and recoil at ${width}px`, async ({ page }, testInfo) => {
+  test.setTimeout(90_000); // 6 breads x 3 positions x 3 states
   await boot(page); await select(page); await fight(page);
   // Resizing forces a slow software-rendered frame; this test measures framing, not the long-frame pause.
   await page.evaluate(() => { window.__panTest.stallPause = false; });
     await page.setViewportSize({ width, height: 844 });
-    for (const bread of ['shokupan', 'francepan', 'croissant']) for (const x of [-1.15, 0, 1.15]) for (const state of ['ready', 'attack', 'recoil']) {
+    for (const bread of BREADS) for (const x of [-1.15, 0, 1.15]) for (const state of ['ready', 'attack', 'recoil']) {
       await page.evaluate(({ bread, x, state }) => {
         const b = window.__panTest.battle;
         b.player.bread = b.cpu.bread = bread; b.player.x = x; b.cpu.x = -x; b.player.attack = b.cpu.attack = null;

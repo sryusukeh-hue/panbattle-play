@@ -4,7 +4,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { BREADS, BREAD_IDS, clamp, type BreadId } from './config';
 import { phase, pose, type BattleView, type BattleEvent, type Fighter, type Side } from './battle';
 import { BattleFeedback, ReplayBuffer, damageStage, DAMAGE_DENT, deformVertex, VISUAL_LIMITS, type BattleSound } from './feedback';
-import { SPECIALS, motionTick } from '../shared/specials';
+import { SPECIALS, motionTick, specialSweep } from '../shared/specials';
 import { FaceRig, buildFaceTemplate, type FaceTemplate } from './face-rig';
 import { FaceState, copyFace, type FaceFrame, type FaceInput, type Reaction } from './face-state';
 
@@ -24,9 +24,17 @@ type Mark = THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
 const sideSign = (side: Side): number => side === 'player' ? 1 : -1;
 const CAMERA_HOME = new THREE.Vector3(.9, 5.8, 7.1);
 // Face-centred stills: local y of the face and how much closer than the whole-bread framing.
-const FACE_FOCUS: Record<BreadId, number> = { shokupan: .02, francepan: .43, croissant: .18 };
-const THUMB_CLOSE: Record<BreadId, number> = { shokupan: 1.25, francepan: 1.8, croissant: 1.25 };
-const PORTRAIT_CLOSE: Record<BreadId, number> = { shokupan: 1.55, francepan: 2.3, croissant: 1.9 };
+const FACE_FOCUS: Record<BreadId, number> = { shokupan: .02, francepan: .43, croissant: .18, melonpan: .03, currypan: .015, creampan: .02 };
+const THUMB_CLOSE: Record<BreadId, number> = { shokupan: 1.25, francepan: 1.8, croissant: 1.25, melonpan: 1.3, currypan: 1.25, creampan: 1.25 };
+const PORTRAIT_CLOSE: Record<BreadId, number> = { shokupan: 1.55, francepan: 2.3, croissant: 1.9, melonpan: 1.65, currypan: 1.7, creampan: 1.6 };
+// Crumbs take the hit bread's own look: shape (box proportions, or a tetrahedron) and colour.
+const CRUMB: Record<BreadId, { color: string; box?: readonly [number, number, number] }> = {
+  shokupan: { color: '#fff5dc', box: [1, 1, .7] }, francepan: { color: '#995020' }, croissant: { color: '#df9e48', box: [1.6, .2, .8] },
+  melonpan: { color: '#e4bc65', box: [1.1, .7, 1.1] }, currypan: { color: '#b8752d' }, creampan: { color: '#f5ddb1', box: [1.25, .8, 1] },
+};
+// Crumbs thrown by a landed special stage: [early stages, final stage].
+const BURST: Record<BreadId, readonly [number, number]> = { shokupan: [24, 24], francepan: [18, 18], croissant: [4, 12], melonpan: [18, 18], currypan: [6, 16], creampan: [18, 18] };
+type Marks = Record<BreadId, Mark[]>;
 export type Mood = 'calm' | 'ouch' | 'dodge' | 'special';
 const MOODS: readonly Mood[] = ['calm', 'ouch', 'dodge', 'special'];
 const REST: FaceInput = { phase: 'ready', special: false, charging: false, stage: 0, ending: null, look: [.25, .1] };
@@ -34,7 +42,7 @@ const REST: FaceInput = { phase: 'ready', special: false, charging: false, stage
 export function dangerHalfWidth(attacker: BreadId, defender: BreadId): number {
   const spec = SPECIALS[attacker], travel = Math.max(...spec.keys.map(k => k.at[2])), gap = Math.abs(2.4 - travel);
   const reach = spec.rz + BREADS[defender].depth, t = Math.min(1, gap / reach);
-  return (spec.rx + BREADS[defender].width) * Math.sqrt(1 - t * t);
+  return (spec.rx + BREADS[defender].width) * Math.sqrt(1 - t * t) + specialSweep(attacker);
 }
 export function damageGeometry(geometry: THREE.BufferGeometry, positions: Float32Array, normals: Float32Array, colors: Float32Array, stage: number, dents: readonly THREE.Vector3[]): void {
   const pos = geometry.attributes.position!, color = geometry.attributes.color!;
@@ -72,8 +80,9 @@ export class TableRenderer {
   private envMap: THREE.Texture; private shadowFrame = 0;
   // Player-state ring under the player's bread: ready / locked / recovering / counter chance.
   private stance: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
-  // Table telegraphs for a special move, one reusable set per side: toast square, baguette lane, three crescents.
-  private marks: Record<Side, { shokupan: Mark[]; francepan: Mark[]; croissant: Mark[] }>;
+  // Table telegraphs for a special move, one reusable set per side: toast square, baguette lane, three crescents,
+  // melon lattice ring, curry ring with two "hits left" dots, cream swipe lane with an arrow.
+  private marks: Record<Side, Marks>;
   private focus = 0; private charging = false;
   // Special stages whose strike visual was shown, per side (attack id + stage mask): each plays once, hit or miss,
   // even when a slow frame skips a whole stage window, and a pause never replays it.
@@ -111,7 +120,7 @@ export class TableRenderer {
     canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); this.lost = true; fail('3D描画が中断しました。再読み込みして再開してください。'); });
     canvas.addEventListener('webglcontextrestored', () => { fail('3D描画が復帰しました。再読み込みしてパンを読み直してください。'); });
   }
-  private markSet(): { shokupan: Mark[]; francepan: Mark[]; croissant: Mark[] } {
+  private markSet(): Marks {
     const mark = (geometry: THREE.BufferGeometry): Mark => {
       const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide }));
       mesh.visible = false; mesh.renderOrder = 2; mesh.userData.added = true; this.scene.add(mesh); return mesh;
@@ -122,7 +131,13 @@ export class TableRenderer {
     const lane = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
     const tip = new THREE.CircleGeometry(.5, 3).rotateZ(Math.PI / 2).rotateX(-Math.PI / 2);
     const crescent = (): THREE.BufferGeometry => new THREE.RingGeometry(.72, 1, 24, 1, Math.PI * .12, Math.PI * .76).rotateX(-Math.PI / 2);
-    return { shokupan: [mark(square), mark(fill)], francepan: [mark(lane), mark(lane.clone()), mark(tip)], croissant: [mark(crescent()), mark(crescent()), mark(crescent())] };
+    // Closed outlines read as "step outside this and you are safe"; the inner marks are decoration, never gaps.
+    const ring = (): THREE.BufferGeometry => new THREE.RingGeometry(.9, 1, 40).rotateX(-Math.PI / 2);
+    const disc = (): THREE.BufferGeometry => new THREE.CircleGeometry(1, 32).rotateX(-Math.PI / 2);
+    const bar = (): THREE.BufferGeometry => new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+    return { shokupan: [mark(square), mark(fill)], francepan: [mark(lane), mark(lane.clone()), mark(tip)], croissant: [mark(crescent()), mark(crescent()), mark(crescent())],
+      melonpan: [mark(ring()), mark(disc()), mark(bar()), mark(bar())], currypan: [mark(ring()), mark(disc()), mark(disc()), mark(disc())],
+      creampan: [mark(ring()), mark(disc()), mark(tip.clone())] };
   }
   private table(): void {
     const textureCanvas = document.createElement('canvas'); textureCanvas.width = 256; textureCanvas.height = 256;
@@ -354,9 +369,10 @@ export class TableRenderer {
   }
   // One crumb of the given bread's material; `power` scales the burst for special moves.
   private crumb(bread: BreadId, x: number, y: number, z: number, i: number, power = 1): void {
-    const size = (.03 + i % 3 * .012) * (power > 1 ? 1.25 : 1);
-    const geometry = bread === 'shokupan' ? new THREE.BoxGeometry(size, size, size * .7) : bread === 'francepan' ? new THREE.TetrahedronGeometry(size) : new THREE.BoxGeometry(size * 1.6, .007, size * .8);
-    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: bread === 'shokupan' ? '#fff5dc' : bread === 'francepan' ? '#995020' : '#df9e48' }));
+    const size = (.03 + i % 3 * .012) * (power > 1 ? 1.25 : 1), look = CRUMB[bread];
+    // The croissant's flakes stay paper-thin whatever their size.
+    const geometry = !look.box ? new THREE.TetrahedronGeometry(size) : new THREE.BoxGeometry(size * look.box[0], bread === 'croissant' ? .007 : size * look.box[1], size * look.box[2]);
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: look.color }));
     mesh.position.set(x, y, z); this.scene.add(mesh);
     const rests = i % 3 === 0;
     this.crumbs.push({ mesh, vx: Math.cos(i * 2.4) * 1.3 * power, vy: (1 + i % 4 * .2) * Math.sqrt(power), vz: Math.sin(i * 2.4) * power, life: rests ? VISUAL_LIMITS.crumbSeconds : .55 + .15 * (power - 1), rests });
@@ -387,7 +403,7 @@ export class TableRenderer {
     this.impacts[victim] = { life: .18, direction: new THREE.Vector3(0, 0, -sideSign(attacker)) };
     this.flash(new THREE.RingGeometry(final ? .18 : .1, final ? .5 : .28, 10), '#ffffff', point, final ? .24 : .14, { face: true, grow: calm ? 0 : final ? 2.8 : 1.4 });
     if (calm) return;
-    const count = bread === 'shokupan' ? 24 : bread === 'francepan' ? 18 : final ? 12 : 4;
+    const count = BURST[bread][final ? 1 : 0];
     for (let i = 0; i < count; i++) this.crumb(battle[victim].bread, event.x, 1.45, event.z, i, final ? 1.7 : 1.1);
     if (final) { this.shake = Math.max(this.shake, bread === 'croissant' ? .1 : .14); this.zoom = .24; }
   }
@@ -402,8 +418,21 @@ export class TableRenderer {
       this.flash(new THREE.RingGeometry(.4, .5, 4).rotateZ(Math.PI / 4), spec.color, new THREE.Vector3(p.x, p.y, p.z), .3, { face: true, grow: calm ? 0 : 2.4 });
     } else if (f.bread === 'francepan') {
       this.flash(new THREE.PlaneGeometry(.12, 2.6).rotateX(-Math.PI / 2), '#e8f6ff', new THREE.Vector3(p.x, .9, p.z + sideSign(side) * .9), .25, { grow: calm ? 0 : .6 });
-    } else {
+    } else if (f.bread === 'croissant') {
       this.flash(new THREE.RingGeometry(.5, .62, 28, 1, Math.PI * .1, Math.PI * .8).rotateZ(stage * 1.1), final ? spec.color : '#fff1c2', new THREE.Vector3(p.x, p.y, p.z), final ? .4 : .22, { face: true, grow: calm ? 0 : final ? 2.6 : 1.2 });
+    } else if (f.bread === 'melonpan') {
+      // A low lattice ring rolls out from the roller and lingers as long as the hit does.
+      this.flash(new THREE.RingGeometry(.62, .74, 36).rotateX(-Math.PI / 2), spec.color, new THREE.Vector3(p.x, .06, p.z), .5, { grow: calm ? 0 : 1.5 });
+      for (const turn of [Math.PI / 4, -Math.PI / 4])
+        this.flash(new THREE.PlaneGeometry(1.2, .05).rotateX(-Math.PI / 2).rotateY(turn), '#f4ffd0', new THREE.Vector3(p.x, .07, p.z), .4, { grow: calm ? 0 : 1.2, peak: .7 });
+    } else if (f.bread === 'currypan') {
+      // A small sizzle first, then the big eight-sided burst.
+      this.flash(new THREE.RingGeometry(final ? .42 : .22, final ? .56 : .3, 8), final ? spec.color : '#ffd08a', new THREE.Vector3(p.x, p.y, p.z), final ? .4 : .2, { face: true, grow: calm ? 0 : final ? 2.8 : 1.3 });
+      if (final) this.flash(new THREE.RingGeometry(.6, .72, 8).rotateX(-Math.PI / 2), '#ffe2b0', new THREE.Vector3(p.x, .06, p.z), .45, { grow: calm ? 0 : 2.4 });
+    } else {
+      // The slap: a half arc in the swipe direction over a soft wide ring.
+      this.flash(new THREE.RingGeometry(.5, .64, 28, 1, -Math.PI / 2, Math.PI).rotateZ(side === 'player' ? 0 : Math.PI), spec.color, new THREE.Vector3(p.x, p.y, p.z), .4, { face: true, grow: calm ? 0 : 2.4 });
+      this.flash(new THREE.RingGeometry(.7, .8, 36).rotateX(-Math.PI / 2), '#fff6dc', new THREE.Vector3(p.x, .06, p.z), .4, { grow: calm ? 0 : 1.6, peak: .7 });
     }
   }
   private cameraEffect(dt: number): void {
@@ -535,7 +564,7 @@ export class TableRenderer {
         // The bright core grows from the baguette toward the target as the thrust nears.
         fill.position.set(aim, .024, near - sign * length * progress / 2); fill.scale.set(half * 2, 1, Math.max(.01, length * progress)); fill.material.opacity = opacity * .55;
         tip.position.set(aim, .026, target - sign * .1); tip.scale.setScalar(.55); tip.rotation.y = side === 'player' ? 0 : Math.PI;
-      } else {
+      } else if (f.bread === 'croissant') {
         // One crescent per stage; each disappears once its hit window has passed.
         const tick = Math.round(a!.age * 120), extra = Math.round(a!.special!.extra * 120);
         meshes.forEach((mesh, i) => {
@@ -543,6 +572,31 @@ export class TableRenderer {
           mesh.position.set(aim, .024 + i * .002, target + sign * (i * .22 - .1)); mesh.scale.set(half, 1, half * .8);
           mesh.rotation.y = side === 'player' ? 0 : Math.PI;
         });
+      } else {
+        // Closed ellipse over the whole danger area, kept until the last hit window closes.
+        const [outline, fill, ...extras] = meshes as [Mark, Mark, ...Mark[]], deep = spec.rz + .16;
+        outline.position.set(aim, .024, target); outline.scale.set(half, 1, deep);
+        fill.position.set(aim, .022, target); fill.material.opacity = opacity * .35;
+        const tick = Math.round(a!.age * 120), extra = Math.round(a!.special!.extra * 120);
+        if (f.bread === 'melonpan') {
+          fill.scale.set(half * progress, 1, deep * progress);
+          // Lattice bars inside the ring, like the scores on the crust.
+          extras.forEach((bar, i) => { bar.position.set(aim, .026, target); bar.scale.set(half * 1.5, 1, .05); bar.rotation.y = (i ? -1 : 1) * Math.PI / 4; bar.material.opacity = opacity * .6; });
+        } else if (f.bread === 'currypan') {
+          fill.scale.set(half * progress, 1, deep * progress);
+          // Two dots beside the ring (toward the middle of the table, clear of both breads): one goes out after each
+          // hit window, so "one more is coming" stays visible.
+          const inward = aim > 0 ? -1 : 1;
+          extras.forEach((dot, i) => {
+            dot.visible = tick < spec.stages[i]!.to + extra;
+            dot.position.set(aim + inward * (half + .2 + i * .26), .026, target); dot.scale.set(.1, 1, .1);
+          });
+        } else {
+          // The bright patch rides with the swiping bread inside the fixed outline; the arrow shows which way it goes.
+          const sweep = specialSweep(f.bread), at = pose(f, side).special!.side, arrow = extras[0]!;
+          fill.position.x = aim + sign * (p === 'windup' ? -sweep : at); fill.scale.set((half - sweep) * (p === 'windup' ? progress : 1), 1, deep * (p === 'windup' ? progress : 1)); fill.material.opacity = opacity * .5;
+          arrow.position.set(aim + sign * half * .45, .026, target + sign * (deep + .22)); arrow.scale.setScalar(.42); arrow.rotation.y = -sign * Math.PI / 2;
+        }
       }
     }
   }

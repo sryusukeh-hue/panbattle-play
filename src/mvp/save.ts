@@ -10,7 +10,8 @@ export interface Saved { version: 1; sound: boolean; sensitivity: number; attack
 export const defaults = (): Saved => ({ version: 1, sound: false, sensitivity: 1, attackSensitivity: 1, tiltSensitivity: 1, bread: 'shokupan', cpu: 'shokupan', practiced: false, best: {} });
 export const condition = (player: BreadId, cpu: BreadId, mode: Mode, difficulty: Difficulty = 'gentle'): string => `${SPECIAL_RULE}/${player}/${cpu}/${difficulty}/${mode}`;
 // Pre-special table-1 records stay readable and untouched; new matches compare only under SPECIAL_RULE.
-const KEY = /^table-(?:special-)?1\/(shokupan|francepan|croissant)\/(shokupan|francepan|croissant)\/(gentle|normal|hard)\/(sensor|touch|keyboard)$/;
+const BREAD = `(${BREAD_IDS.join('|')})`;
+const KEY = new RegExp(`^table-(?:special-)?1/${BREAD}/${BREAD}/(gentle|normal|hard)/(sensor|touch|keyboard)$`);
 export const rate = (m: Metric | undefined): number | null => m && m.opportunities > 0 ? m.success / m.opportunities : null;
 function validMetric(m: unknown): m is Metric {
   if (!m || typeof m !== 'object') return false;

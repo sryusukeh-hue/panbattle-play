@@ -1,6 +1,6 @@
 import { BREADS, LIMIT, STEP, clamp, type BreadId } from './config';
 import { createBattle, startAttack, startSpecial, canSpecial, stepBattle, phase, pose as sharedPose, type Slot, type Fighter, type Pose, type BattleEvent as SharedEvent } from '../shared/battle';
-import { SPECIALS, METER_MAX, CUTIN_SECONDS, specialDuration } from '../shared/specials';
+import { SPECIALS, METER_MAX, CUTIN_SECONDS, specialDuration, specialSweep } from '../shared/specials';
 export { phase, movable, touching, emptyScores, type Attack, type Fighter, type Pose, type Metric, type Scores } from '../shared/battle';
 
 export type Side = 'player' | 'cpu';
@@ -15,7 +15,10 @@ export const CPU_STYLE = {
   shokupan: { interval: 2.9, jitter: .9, pair: .28, pairInterval: 2.7, move: .35, observe: 2.8 },
   francepan: { interval: 3.5, jitter: 1.2, pair: .18, pairInterval: 3.0, move: .25, observe: 3.4 },
   croissant: { interval: 3.0, jitter: 1.3, pair: .45, pairInterval: 2.7, move: .5, observe: 2.1 },
-} as const;
+  melonpan: { interval: 3.1, jitter: .8, pair: .20, pairInterval: 2.8, move: .45, observe: 2.5 },
+  currypan: { interval: 3.4, jitter: 1.0, pair: .15, pairInterval: 3.0, move: .22, observe: 3.1 },
+  creampan: { interval: 3.0, jitter: 1.0, pair: .32, pairInterval: 2.7, move: .48, observe: 2.4 },
+} as const satisfies Record<BreadId, { interval: number; jitter: number; pair: number; pairInterval: number; move: number; observe: number }>;
 export type Difficulty = 'gentle' | 'normal' | 'hard';
 export const DIFFICULTIES: readonly Difficulty[] = ['gentle', 'normal', 'hard'];
 // windup/recovery pad the CPU swing; pace scales attack intervals.
@@ -167,7 +170,7 @@ export class Battle {
         if (swing && swing.id !== this.judged && (special ? level.specialDodge > 0 && swing.age >= level.specialReact : level.dodge > 0 && swing.age >= level.react)) {
           // Decide once per swing after a human-like reaction delay; only swings that would connect are worth dodging.
           this.judged = swing.id;
-          const reach = (special ? SPECIALS[this.player.bread].rx : BREADS[this.player.bread].width) + BREADS[this.cpu.bread].width;
+          const reach = (special ? SPECIALS[this.player.bread].rx + specialSweep(this.player.bread) : BREADS[this.player.bread].width) + BREADS[this.cpu.bread].width;
           const chance = special ? level.specialDodge : level.dodge + (this.mashed === swing.id ? level.spam : 0);
           if (swing.age < swing.windup && Math.abs(swing.aim - this.cpu.x) < reach && !this.cpu.attack && this.random() < chance) {
             // Step away from the fixed aim, choosing the side that leaves more distance after the table edge clamp.
@@ -179,13 +182,16 @@ export class Battle {
             if (level.punish) this.nextCpu = Math.min(this.nextCpu, nextTime + swing.windup - swing.age + (special ? SPECIALS[this.player.bread].active : BREADS[this.player.bread].active));
           }
         }
-        if (nextTime >= this.nextMove && !this.cpu.attack) {
+        // Having chosen to sidestep a special, the CPU stays out until its last hit window has closed: it neither
+        // wanders back nor starts a swing into a roller that is still there or a second beat that is still coming.
+        const holding = special && this.sidestep === swing!.id && (phase(this.player) === 'windup' || phase(this.player) === 'active');
+        if (nextTime >= this.nextMove && !this.cpu.attack && !holding) {
           this.cpuTarget = this.practice ? 0 : (this.random() - .5) * style.move * 2;
           this.nextMove = nextTime + (this.practice ? 2.8 : style.observe) + this.random() * 2;
         }
         // A full meter waits a moment, then replaces the next attack (or, above gentle, jumps on a visible gap).
-        if (!this.practice && this.cpuSpecialDue(nextTime) && this.specials([], this.cpuExtra())) break;
-        if (nextTime >= this.nextCpu && !this.cpu.attack && this.cpu.recoil <= 0) {
+        if (!this.practice && this.cpuSpecialDue(nextTime) && !holding && this.specials([], this.cpuExtra())) break;
+        if (nextTime >= this.nextCpu && !this.cpu.attack && this.cpu.recoil <= 0 && !holding) {
           this.attack('cpu');
           if (this.practice) this.nextCpu = nextTime + 2.7 + this.random() * 1.1;
           else {
