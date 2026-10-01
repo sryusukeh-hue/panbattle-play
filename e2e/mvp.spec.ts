@@ -107,7 +107,10 @@ test('model loading and WebGL context failures freeze the game with retry', asyn
 });
 test('storage failure is visible, settings and result still work', async ({ page }) => {
   await page.addInitScript(() => { Storage.prototype.setItem = () => { throw new DOMException('full', 'QuotaExceededError'); }; });
-  await boot(page); await page.getByRole('button', { name: '設定', exact: true }).click(); await page.getByLabel('音を鳴らす').check();
+  await boot(page);
+  // This scenario runs on real time and checks storage failure, not the long-frame pause; a slow CI frame must not end it.
+  await page.evaluate(() => { window.__panTest.stallPause = false; });
+  await page.getByRole('button', { name: '設定', exact: true }).click(); await page.getByLabel('音を鳴らす').check();
   await expect(page.locator('#save-warning')).toContainText('端末に保存できません');
   await page.getByRole('button', { name: '戻る', exact: true }).click(); await select(page); await fight(page);
   await page.evaluate(() => { window.__panTest.battle.elapsed = 59.99; });
