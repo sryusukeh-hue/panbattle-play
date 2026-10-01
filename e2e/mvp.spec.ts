@@ -115,7 +115,7 @@ test('storage failure is visible, settings and result still work', async ({ page
   await expect(page.getByRole('button', { name: '同じパンで、もう一戦 →' })).toBeVisible();
 });
 for (const width of [360, 390, 430]) test(`six breads and all opponent combinations render without errors at ${width}px`, async ({ page }, testInfo) => {
-  test.setTimeout(90_000); // 6x6 opponent combinations
+  test.setTimeout(process.env.CI ? 240_000 : 90_000); // CI (software rendering, ~3x slower) gets more time; 6x6 opponent combinations
   const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
   await boot(page); await page.screenshot({ path: testInfo.outputPath('title.png') }); await select(page);
     await page.setViewportSize({ width, height: 844 });
@@ -232,7 +232,7 @@ for (const gravitySign of [-1, 1]) test(`portrait gravity sign ${gravitySign}: p
   await expect(page.locator('#app')).toHaveAttribute('data-screen', 'battle');
 });
 for (const width of [360, 390, 430]) test(`all bread silhouettes stay within portrait view at lateral extremes, attack and recoil at ${width}px`, async ({ page }, testInfo) => {
-  test.setTimeout(90_000); // 6 breads x 3 positions x 3 states
+  test.setTimeout(process.env.CI ? 240_000 : 90_000); // CI (software rendering, ~3x slower) gets more time; 6 breads x 3 positions x 3 states
   await boot(page); await select(page); await fight(page);
   // Resizing forces a slow software-rendered frame; this test measures framing, not the long-frame pause.
   await page.evaluate(() => { window.__panTest.stallPause = false; });

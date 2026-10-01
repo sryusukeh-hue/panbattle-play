@@ -12,7 +12,7 @@ async function start(page: Page): Promise<void> {
 }
 
 test('damage, anticipation, crumbs and rematch stay visual and reset for every bread', async ({ page }, info) => {
-  test.setTimeout(90_000); // six breads in one scenario
+  test.setTimeout(process.env.CI ? 240_000 : 90_000); // CI (software rendering, ~3x slower) gets more time; six breads in one scenario
   await start(page);
   for (const bread of ['shokupan', 'francepan', 'croissant', 'melonpan', 'currypan', 'creampan']) {
     const result = await page.evaluate(bread => {

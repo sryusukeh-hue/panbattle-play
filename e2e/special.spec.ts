@@ -28,7 +28,7 @@ async function runUntil(page: Page, ready: () => Promise<boolean>, limit = 4000)
 }
 
 test('every bread: X starts the cut-in, time freezes, the move lands its fixed damage and the meter resets', async ({ page }, info) => {
-  test.setTimeout(90_000); // all six specials in one match
+  test.setTimeout(process.env.CI ? 240_000 : 90_000); // CI (software rendering, ~3x slower) gets more time; all six specials in one match
   const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
   await start(page); await fight(page);
   for (const bread of BREADS) {

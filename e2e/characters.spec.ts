@@ -60,7 +60,7 @@ test('ability pips use fixed ranges: the strongest hitter and the quickest recov
 });
 
 test('each added bread shows its face as the CPU, telegraphs its special in red, and the special can be dodged', async ({ page }, info) => {
-  test.setTimeout(90_000);
+  test.setTimeout(process.env.CI ? 240_000 : 90_000); // CI (software rendering, ~3x slower) gets more time
   const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
   await start(page); await fight(page);
   for (const [id, [, special]] of Object.entries(NEW)) {
@@ -93,7 +93,7 @@ test('each added bread shows its face as the CPU, telegraphs its special in red,
 });
 
 test('each added bread lands its special as the player, with its own strike shape', async ({ page }, info) => {
-  test.setTimeout(90_000);
+  test.setTimeout(process.env.CI ? 240_000 : 90_000); // CI (software rendering, ~3x slower) gets more time
   await start(page); await fight(page);
   for (const id of Object.keys(NEW)) {
     await page.evaluate(id => {
@@ -108,7 +108,7 @@ test('each added bread lands its special as the player, with its own strike shap
 });
 
 test('the melon pan fills its meter with three dodges', async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(process.env.CI ? 240_000 : 90_000); // CI (software rendering, ~3x slower) gets more time
   await start(page); await page.locator('[data-bread="melonpan"]').click(); await fight(page);
   for (let i = 1; i <= 3; i++) {
     await page.evaluate(() => { const b = window.__panTest.battle; b.cpuEnabled = true; b.player.x = b.cpu.x = 0; b.cpuTarget = 0; b.nextMove = 1e9; b.nextCpu = 0; b.rageUsed = true; });
@@ -141,7 +141,7 @@ test('a picked new bread and opponent survive a reload and start a match', async
 
 const TIPS = { melonpan: '輪が消えるまで、戻らず待とう', currypan: '丸が2つとも消えるまで、戻らず待とう', creampan: '赤い輪の外まで逃げよう' } as const;
 for (const [id, tip] of Object.entries(TIPS)) test(`special drill against a ${id} CPU: the tip says how to dodge it, a partial dodge does not pass, real input completes it`, async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(process.env.CI ? 240_000 : 90_000); // CI (software rendering, ~3x slower) gets more time
   await page.addInitScript(value => localStorage.setItem('panbattle.3d.v1', value), JSON.stringify({ version: 1, sound: false, sensitivity: 1, bread: 'shokupan', cpu: id, practiced: true, best: {} }));
   await start(page);
   await page.getByRole('button', { name: 'NEW! ひっさつだけ練習する' }).click();
@@ -171,7 +171,7 @@ for (const [id, tip] of Object.entries(TIPS)) test(`special drill against a ${id
 });
 
 test('telegraphs mean what they show: curry dots count down 2-1-0, the cream patch follows the swipe on both sides', async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(process.env.CI ? 240_000 : 90_000); // CI (software rendering, ~3x slower) gets more time
   await start(page); await fight(page);
   const fire = async (side: 'player' | 'cpu', bread: string): Promise<void> => {
     await page.evaluate(({ side, bread }) => {
@@ -213,7 +213,7 @@ test('telegraphs mean what they show: curry dots count down 2-1-0, the cream pat
 });
 
 test('pausing inside each new special keeps time, HP and marks, and nothing plays twice after resuming', async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(process.env.CI ? 240_000 : 90_000); // CI (software rendering, ~3x slower) gets more time
   await start(page); await fight(page);
   for (const [id, at] of [['melonpan', 110], ['currypan', 100], ['creampan', 95]] as const) {
     await page.evaluate(id => {
@@ -239,7 +239,7 @@ test('pausing inside each new special keeps time, HP and marks, and nothing play
 });
 
 for (const reduced of [false, true]) test(`a new bread's special K.O. plays the replay and a rematch starts clean${reduced ? ' (reduced motion)' : ''}`, async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(process.env.CI ? 240_000 : 90_000); // CI (software rendering, ~3x slower) gets more time
   if (reduced) await page.emulateMedia({ reducedMotion: 'reduce' });
   const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
   await start(page); await page.locator('[data-bread="creampan"]').click(); await page.locator('#opponent').selectOption('currypan'); await fight(page);
