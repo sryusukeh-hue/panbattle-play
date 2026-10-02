@@ -1,4 +1,4 @@
-import { BREAD_IDS, type BreadId, type Mode } from './config';
+import { BREAD_IDS, type BreadId, type FighterId, type Mode } from './config';
 import { SPECIAL_RULE } from '../shared/rules';
 import { DIFFICULTIES, type Battle, type Difficulty, type Metric, type Scores } from './battle';
 export const SAVE_KEY = 'panbattle.3d.v1';
@@ -12,6 +12,7 @@ export const condition = (player: BreadId, cpu: BreadId, mode: Mode, difficulty:
 // Pre-special table-1 records stay readable and untouched; new matches compare only under SPECIAL_RULE.
 const BREAD = `(${BREAD_IDS.join('|')})`;
 const KEY = new RegExp(`^table-(?:special-)?1/${BREAD}/${BREAD}/(gentle|normal|hard)/(sensor|touch|keyboard)$`);
+export const playable = (id: FighterId): id is BreadId => BREAD_IDS.includes(id as BreadId);
 export const rate = (m: Metric | undefined): number | null => m && m.opportunities > 0 ? m.success / m.opportunities : null;
 function validMetric(m: unknown): m is Metric {
   if (!m || typeof m !== 'object') return false;
@@ -48,8 +49,11 @@ export class SaveStore {
     try { this.storage().setItem(SAVE_KEY, JSON.stringify(this.data)); this.warning = ''; return true; }
     catch { this.warning = '端末に保存できませんでした。今回の設定と成績は、この画面を閉じるまで保持します。'; return false; }
   }
+  // Free-battle records only: the boss never appears in these keys (an unknown bread would make the whole save invalid).
   record(battle: Battle, mode: Mode): Partial<Scores> {
-    const key = condition(battle.player.bread, battle.cpu.bread, mode, battle.difficulty);
+    const player = battle.player.bread, cpu = battle.cpu.bread;
+    if (!playable(player) || !playable(cpu)) return {};
+    const key = condition(player, cpu, mode, battle.difficulty);
     const previous = structuredClone(this.data.best[key] ?? {});
     if (battle.practice || battle.outcome === null) return previous;
     const next = structuredClone(previous);
@@ -61,7 +65,9 @@ export class SaveStore {
   }
   // Returns the previous best score for the same condition (null when none), then keeps the higher one.
   recordScore(battle: Battle, mode: Mode, score: number): number | null {
-    const key = condition(battle.player.bread, battle.cpu.bread, mode, battle.difficulty), previous = this.data.bestScoreV2?.[key] ?? null;
+    const player = battle.player.bread, cpu = battle.cpu.bread;
+    if (!playable(player) || !playable(cpu)) return null;
+    const key = condition(player, cpu, mode, battle.difficulty), previous = this.data.bestScoreV2?.[key] ?? null;
     if (battle.practice || battle.outcome === null || !Number.isInteger(score) || score < 0 || score > 100) return previous;
     if (previous === null || score > previous) { this.data.bestScoreV2 = { ...this.data.bestScoreV2, [key]: score }; this.persist(); }
     return previous;

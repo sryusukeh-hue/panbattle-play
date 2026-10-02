@@ -1,4 +1,4 @@
-import type { BreadId } from './config';
+import type { FighterId } from './config';
 import { FACES, type BrowId, type EyeStyle, type MouthId } from './face-config';
 
 // Expression logic, free of DOM/WebGL (plans/EXECPLAN-FACE.md 3). Layers, highest first:
@@ -12,6 +12,8 @@ export interface FaceInput {
   ending: 'win' | 'lose' | 'draw' | null;
   // Where the opponent is, as a share of the pupil's travel (-1..1 each axis).
   look: readonly [number, number];
+  // The boss's second form: its resting brow turns angry (reactions and the result still override it).
+  heated?: boolean;
 }
 export interface FaceFrame {
   open: [number, number]; gaze: [number, number];
@@ -39,23 +41,26 @@ export function blinkCurve(age: number): number {
   if (age < BLINK.close + BLINK.hold) return 0;
   return (age - BLINK.close - BLINK.hold) / BLINK.open;
 }
-const RESULT: Record<BreadId, Record<'win' | 'lose' | 'draw', Partial<FaceFrame>>> = {
+const RESULT: Record<FighterId, Record<'win' | 'lose' | 'draw', Partial<FaceFrame>>> = {
   shokupan: { win: { eyes: 'happy', mouth: 'win', cheek: 1, brow: 'worry' }, lose: { eyes: 'shut', mouth: 'lose', brow: 'worry' }, draw: { mouth: 'huh', brow: 'worry' } },
   francepan: { win: { open: [.35, .75], mouth: 'smug', brow: 'up' }, lose: { eyes: 'shut', mouth: 'lose', brow: 'worry' }, draw: { mouth: 'huh', brow: 'up' } },
   croissant: { win: { eyes: 'happy', mouth: 'win', cheek: .8 }, lose: { eyes: 'shut', mouth: 'lose', brow: 'worry' }, draw: { mouth: 'huh' } },
   melonpan: { win: { eyes: 'happy', mouth: 'win', cheek: .8, brow: 'none' }, lose: { eyes: 'shut', mouth: 'lose', brow: 'worry' }, draw: { mouth: 'huh', brow: 'worry' } },
   currypan: { win: { open: [.75, .75], mouth: 'smug', brow: 'up', cheek: .4 }, lose: { open: [.35, .55], mouth: 'lose', brow: 'worry' }, draw: { mouth: 'huh', brow: 'up' } },
   creampan: { win: { eyes: 'happy', mouth: 'win', cheek: 1, brow: 'up' }, lose: { eyes: 'shut', mouth: 'lose', brow: 'worry', cheek: .3 }, draw: { mouth: 'huh', brow: 'worry' } },
+  // A defeated boss is a good sport: it smiles.
+  ikkin: { win: { open: [.6, .6], mouth: 'smug', brow: 'angry' }, lose: { eyes: 'happy', mouth: 'win', cheek: .9, brow: 'up' }, draw: { mouth: 'huh', brow: 'up' } },
 };
-const ATTACK_BROW: Record<BreadId, BrowId> = { shokupan: 'worry', francepan: 'angry', croissant: 'angry', melonpan: 'worry', currypan: 'angry', creampan: 'up' };
+const ATTACK_BROW: Record<FighterId, BrowId> = { shokupan: 'worry', francepan: 'angry', croissant: 'angry', melonpan: 'worry', currypan: 'angry', creampan: 'up', ikkin: 'angry' };
 // Face while a special winds up and strikes.
-const SPECIAL_FACE: Record<BreadId, Partial<FaceFrame>> = {
+const SPECIAL_FACE: Record<FighterId, Partial<FaceFrame>> = {
   shokupan: { open: [.9, .9], mouth: 'serious', brow: 'none', pupil: .6, cheek: 0 },
   francepan: { open: [1, 1], pop: 1.15, mouth: 'attack', brow: 'angry', pupil: .75 },
   croissant: { open: [1, .85], mouth: 'wild', brow: 'angry', cheek: .8 },
   melonpan: { open: [.95, .95], mouth: 'serious', brow: 'none', pupil: .75 },
   currypan: { open: [1, 1], mouth: 'wild', brow: 'angry', cheek: .4 },
   creampan: { open: [1, 1], mouth: 'win', brow: 'up', cheek: .8 },
+  ikkin: { open: [1, 1], pop: 1.1, mouth: 'wild', brow: 'angry', pupil: .7, cheek: 0 },
 };
 
 export class FaceState {
@@ -64,7 +69,7 @@ export class FaceState {
   private reaction: { kind: Reaction; at: number } | null = null;
   private gaze: [number, number] = [0, 0]; private previous: FacePhase = 'ready';
   private rand: () => number;
-  constructor(readonly bread: BreadId, private seed = 1) { this.rand = random(seed); this.reset(); }
+  constructor(readonly bread: FighterId, private seed = 1) { this.rand = random(seed); this.reset(); }
   reset(): void {
     this.rand = random(this.seed); this.clock = 0; this.reaction = null; this.gaze = [0, 0]; this.previous = 'ready';
     this.next = BLINK.min + this.rand() * (BLINK.max - BLINK.min); this.blinkAt = -1;
@@ -92,6 +97,7 @@ export class FaceState {
     frame.open = [frame.open[0] * tired(0), frame.open[1] * tired(1)];
     if (stage >= 2) frame.cheek *= .5;
     if (stage >= 1 && frame.brow === 'none') frame.brow = 'worry';
+    if (input.heated) frame.brow = 'angry';
     // Action phase.
     if (input.charging) { frame.open = [.8, .8]; frame.mouth = 'tight'; frame.brow = 'angry'; frame.pupil = .85; }
     else if (input.special && (phase === 'windup' || phase === 'active')) { const face = SPECIAL_FACE[this.bread]; Object.assign(frame, face, { open: [...face.open!] }); }

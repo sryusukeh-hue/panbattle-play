@@ -135,7 +135,8 @@ test('a picked new bread and opponent survive a reload and start a match', async
   await expect(page.locator('[data-bread="currypan"]')).toHaveAttribute('aria-pressed', 'true'); await expect(page.locator('#opponent')).toHaveValue('creampan');
   await fight(page);
   await expect(page.locator('.health').first()).toContainText('カレーパン'); await expect(page.locator('.health.enemy')).toContainText('クリームパン');
-  expect(await page.evaluate(() => Object.keys(window.__panTest.renderer.marks.player))).toEqual(ALL);
+  // The boss's press telegraph set rides along (plans/EXECPLAN-BOSS.md); it is never selectable.
+  expect(await page.evaluate(() => Object.keys(window.__panTest.renderer.marks.player))).toEqual([...ALL, 'ikkin']);
   expect(errors).toEqual([]);
 });
 

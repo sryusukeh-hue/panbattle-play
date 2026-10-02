@@ -1,4 +1,4 @@
-import { BREADS, LIMIT, STEP, PVP_WINDUP_EXTRA, PVP_RECOVERY_EXTRA, clamp, mix, type BreadId, type Ruleset } from './rules';
+import { BREADS, LIMIT, STEP, PVP_WINDUP_EXTRA, PVP_RECOVERY_EXTRA, clamp, mix, type FighterId, type Ruleset } from './rules';
 import { SPECIALS, METER_MAX, METER_GAIN, dodgeGain, motionTime, motionTick, liveStage, specialFrame, type SpecialFrame } from './specials';
 
 export const SLOTS = ['A', 'B'] as const;
@@ -16,12 +16,12 @@ export interface Attack {
   // Present only when specials are enabled (CPU battles); PvP state keeps its original shape.
   near?: boolean; special?: SpecialMove;
 }
-export interface Fighter { bread: BreadId; hp: number; x: number; attack: Attack | null; recoil: number; hit: number; meter?: number }
+export interface Fighter { bread: FighterId; hp: number; x: number; attack: Attack | null; recoil: number; hit: number; meter?: number }
 export interface Pose { x: number; y: number; z: number; lean: number; rx: number; rz: number; progress: number; special?: SpecialFrame & { t: number } }
 export interface BattleEvent {
   id: number; kind: 'hit' | 'clash' | 'miss' | 'dodge' | 'counter' | 'attack' | 'special' | 'special-hit'; side: Slot; x: number; z: number;
-  // special-hit: stage index; special: the miss/dodge belongs to a special move.
-  stage?: number; special?: boolean;
+  // special-hit: stage index; special: the miss/dodge belongs to a special move; guard: the boss's crust blocked most of the hit.
+  stage?: number; special?: boolean; guard?: boolean;
 }
 export interface Command { target: number; attack: boolean; special?: boolean }
 export type Commands = Record<Slot, Command>;
@@ -34,10 +34,21 @@ export interface BattleState {
   cpuExtra?: { windup: number; recovery: number; counters?: boolean; damage?: number; grace?: number };
   // Special meter and moves. Only CPU battles opt in; PvP rejects them in the core.
   specials?: boolean;
+  // Match length in seconds for CPU battles that differ from the standard 60 (the boss). PvP never sets it.
+  limit?: number;
+  // CPU-only: slot B's sidestep speed (m/s; the boss is slower) and whether a time-out still needs B knocked out
+  // for A to win (the boss must be defeated). PvP never sets either.
+  cpuSpeed?: number; koOnly?: boolean;
+  // CPU-only "crust guard" (the boss): slot A's normal hits deal this share of their damage unless slot B is in the
+  // recovery of its own swing or the hit is a counter. Specials always land in full. PvP never sets it.
+  guard?: number;
 }
+export const MOVE_SPEED = 4.8;
+export const MATCH_SECONDS = 60;
+export const matchLimit = (s: Pick<BattleState, 'limit'>): number => s.limit ?? MATCH_SECONDS;
 export const emptyScores = (): Scores => ({ dodge: { success: 0, opportunities: 0 }, counter: { success: 0, opportunities: 0 } });
-export function createBattle(a: BreadId, b: BreadId, rules: Ruleset = 'pvp', practice = false): BattleState {
-  const fighter = (bread: BreadId): Fighter => ({ bread, hp: BREADS[bread].hp, x: 0, attack: null, recoil: 0, hit: 0 });
+export function createBattle(a: FighterId, b: FighterId, rules: Ruleset = 'pvp', practice = false): BattleState {
+  const fighter = (bread: FighterId): Fighter => ({ bread, hp: BREADS[bread].hp, x: 0, attack: null, recoil: 0, hit: 0 });
   return { fighters: { A: fighter(a), B: fighter(b) }, scores: { A: emptyScores(), B: emptyScores() },
     counters: { A: { until: 0, available: false }, B: { until: 0, available: false } },
     elapsed: 0, tick: 0, winner: null, rules, practice, attackSerial: 0, eventSerial: 0 };
@@ -77,7 +88,7 @@ export function touching(a: Pose, b: Pose): boolean {
   return ((a.x - b.x) / (a.rx + b.rx)) ** 2 + ((a.z - b.z) / (a.rz + b.rz)) ** 2 <= 1;
 }
 // A special move's own attack ellipse against the defender's normal hurt ellipse.
-export function specialTouching(bread: BreadId, attack: Pose, hurt: Pose): boolean {
+export function specialTouching(bread: FighterId, attack: Pose, hurt: Pose): boolean {
   const s = SPECIALS[bread];
   return ((attack.x - hurt.x) / (s.rx + hurt.rx)) ** 2 + ((attack.z - hurt.z) / (s.rz + hurt.rz)) ** 2 <= 1;
 }
@@ -88,7 +99,7 @@ function specialStage(s: BattleState, slot: Slot, poses: Record<Slot, Pose>): nu
   const stage = liveStage(f.bread, motionTick(f.bread, a.age, a.special.extra));
   return stage >= 0 && !(a.special.mask & 1 << stage) && specialTouching(f.bread, poses[slot], poses[otherSlot(slot)]) ? stage : -1;
 }
-function emit(s: BattleState, events: BattleEvent[], kind: BattleEvent['kind'], side: Slot, x: number, z: number, extra: Pick<BattleEvent, 'stage' | 'special'> = {}): void {
+function emit(s: BattleState, events: BattleEvent[], kind: BattleEvent['kind'], side: Slot, x: number, z: number, extra: Pick<BattleEvent, 'stage' | 'special' | 'guard'> = {}): void {
   events.push({ id: ++s.eventSerial, kind, side, x, z, ...extra });
 }
 function gain(s: BattleState, slot: Slot, amount: number): void {
@@ -132,11 +143,12 @@ export function stepBattle(s: BattleState, commands: Commands, events: BattleEve
   for (const slot of SLOTS) if (specials[slot]) startSpecial(s, slot, events);
   for (const slot of SLOTS) if (commands[slot].attack && !specials[slot]) startAttack(s, slot, events);
   s.tick++;
-  s.elapsed = s.practice ? s.elapsed + STEP : Math.min(60, s.elapsed + STEP);
+  s.elapsed = s.practice ? s.elapsed + STEP : Math.min(matchLimit(s), s.elapsed + STEP);
   for (const slot of SLOTS) {
     const f = s.fighters[slot], target = commands[slot].target;
     const desired = Number.isFinite(target) ? clamp(target, -LIMIT, LIMIT) : f.x;
-    if (movable(f)) f.x += clamp(desired - f.x, -STEP * 4.8, STEP * 4.8);
+    const speed = slot === 'B' && s.rules !== 'pvp' ? s.cpuSpeed ?? MOVE_SPEED : MOVE_SPEED;
+    if (movable(f)) f.x += clamp(desired - f.x, -STEP * speed, STEP * speed);
     f.recoil = Math.max(0, f.recoil - STEP); f.hit = Math.max(0, f.hit - STEP);
     if (f.attack) f.attack.age += STEP;
   }
@@ -146,15 +158,19 @@ export function stepBattle(s: BattleState, commands: Commands, events: BattleEve
   const hits = { A: normal('A'), B: normal('B') };
   const stages = { A: specialStage(s, 'A', poses), B: specialStage(s, 'B', poses) };
   // Compute every hit flag before any HP, recoil or attack mutations.
+  const open = phase(s.fighters.B) === 'recovery';
+  let guarded = false;
   for (const slot of SLOTS) {
     if (!hits[slot]) continue;
     const opposite = otherSlot(slot), f = s.fighters[slot], other = s.fighters[opposite], a = f.attack!;
     a.spent = true; a.impact = { progress: poses[slot].progress, age: a.age };
     const counter = !hits[opposite] && s.counters[slot].available && s.elapsed <= s.counters[slot].until;
-    const scale = slot === 'B' && s.rules !== 'pvp' ? s.cpuExtra?.damage ?? 1 : 1;
+    const guard = slot === 'A' && s.rules !== 'pvp' && s.guard !== undefined && !counter && !open;
+    guarded ||= guard;
+    const scale = slot === 'B' && s.rules !== 'pvp' ? s.cpuExtra?.damage ?? 1 : guard ? s.guard! : 1;
     if (!s.practice) other.hp = Math.max(0, other.hp - BREADS[f.bread].damage * (counter ? 1.25 : 1) * scale);
     other.hit = .3;
-    gain(s, slot, hits[opposite] || stages[opposite] >= 0 ? METER_GAIN.clash : counter ? METER_GAIN.counter : METER_GAIN.hit);
+    gain(s, slot, hits[opposite] || stages[opposite] >= 0 || guard ? METER_GAIN.clash : counter ? METER_GAIN.counter : METER_GAIN.hit);
     if (a.threatened && !a.resolved) { s.scores[opposite].dodge.opportunities++; a.resolved = true; }
     if (counter) {
       s.scores[slot].counter.success++; s.counters[slot].available = false;
@@ -162,7 +178,7 @@ export function stepBattle(s: BattleState, commands: Commands, events: BattleEve
     }
   }
   if (hits.A || hits.B) {
-    emit(s, events, hits.A && hits.B ? 'clash' : 'hit', hits.A ? 'A' : 'B', (poses.A.x + poses.B.x) / 2, (poses.A.z + poses.B.z) / 2);
+    emit(s, events, hits.A && hits.B ? 'clash' : 'hit', hits.A ? 'A' : 'B', (poses.A.x + poses.B.x) / 2, (poses.A.z + poses.B.z) / 2, guarded && !hits.B ? { guard: true } : {});
     s.fighters.A.recoil = .38; s.fighters.B.recoil = .38;
   }
   // Special stages: fixed damage (no counter or CPU scaling), no meter, and they never bend the attacker's path.
@@ -198,8 +214,10 @@ export function stepBattle(s: BattleState, commands: Commands, events: BattleEve
     }
     if (a.age >= a.windup + active + a.recovery) f.attack = null;
   }
-  if (!s.practice && (s.fighters.A.hp <= 0 || s.fighters.B.hp <= 0 || s.elapsed >= 60 - 1e-8)) {
+  if (!s.practice && (s.fighters.A.hp <= 0 || s.fighters.B.hp <= 0 || s.elapsed >= matchLimit(s) - 1e-8)) {
     const diff = s.fighters.A.hp / BREADS[s.fighters.A.bread].hp - s.fighters.B.hp / BREADS[s.fighters.B.bread].hp;
     s.winner = Math.abs(diff) < 1e-9 ? 'draw' : diff > 0 ? 'A' : 'B';
+    // Boss rule: running out the clock never beats a boss that is still standing (whatever the HP ratios); a double KO stays a draw.
+    if (s.koOnly && s.rules !== 'pvp' && s.fighters.A.hp > 0 && s.fighters.B.hp > 0) s.winner = 'B';
   }
 }

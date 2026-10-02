@@ -5,9 +5,15 @@ export const BREADS = {
   melonpan: { name: 'メロンパン', note: 'サクッと回避！ひっさつが早くたまる。', hp: 100, damage: 20, windup: .24, active: .28, recovery: .54, reach: 2.00, width: .552, height: .506, depth: .276, lean: .52 },
   currypan: { name: 'カレーパン', note: '近くでドカン！一撃は強いが戻りは遅い。', hp: 100, damage: 26, windup: .24, active: .14, recovery: .80, reach: 1.97, width: .4508, height: .3588, depth: .230, lean: .62 },
   creampan: { name: 'クリームパン', note: '出だしはゆっくり。空振りしても早く戻る。', hp: 100, damage: 16, windup: .30, active: .15, recovery: .28, reach: 2.00, width: .6256, height: .4324, depth: .2116, lean: .42 },
+  // Boss of the CPU challenge (plans/EXECPLAN-BOSS.md). Never selectable and never online: BREAD_IDS below omits it.
+  ikkin: { name: '一斤食パン', note: 'どっしり大きい。よけた後が大チャンス。', hp: 180, damage: 24, windup: .50, active: .22, recovery: .90, reach: 1.72, width: .75, height: .80, depth: .65, lean: .48 },
 } as const;
-export type BreadId = keyof typeof BREADS;
-export const BREAD_IDS = Object.keys(BREADS) as BreadId[];
+export type FighterId = keyof typeof BREADS;
+export const BOSS_ID = 'ikkin' as const satisfies FighterId;
+export type BreadId = Exclude<FighterId, typeof BOSS_ID>;
+// The six playable breads (selection, PvP validation, saves).
+export const BREAD_IDS = (Object.keys(BREADS) as FighterId[]).filter((id): id is BreadId => id !== BOSS_ID);
+export const FIGHTER_IDS = Object.keys(BREADS) as FighterId[];
 export type Mode = 'sensor' | 'touch' | 'keyboard';
 export const RULE = 'table-1';
 // CPU matches with specials; records under RULE are kept but no longer compared.

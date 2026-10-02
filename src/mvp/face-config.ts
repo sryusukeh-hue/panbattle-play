@@ -1,4 +1,4 @@
-import type { BreadId } from './config';
+import type { FighterId } from './config';
 
 // Face layout and personality per bread (plans/EXECPLAN-FACE.md 1-2). Coordinates are the bread's local space after
 // renderer.load() scales and centres the GLB; eye z is found by a ray against the surface, not stored here.
@@ -23,7 +23,7 @@ export interface FaceSpec {
 
 export const FACE_COLORS = { white: '#fff0dc', pupil: '#281b18', lip: '#ad6661', line: '#3a2418', cheek: '#e8826a', sweat: '#bfe3f2', tooth: '#fffaf0' } as const;
 
-export const FACES: Record<BreadId, FaceSpec> = {
+export const FACES: Record<FighterId, FaceSpec> = {
   shokupan: {
     eyes: [{ x: -.215, y: .15, radius: [.106, .117, .058] }, { x: .205, y: .13, radius: [.099, .109, .056] }],
     pupil: .038, open: [1, .96], mouth: { x: 0, y: -.12, w: .21, h: .11 },
@@ -60,6 +60,13 @@ export const FACES: Record<BreadId, FaceSpec> = {
     pupil: .038, open: [1, .96], mouth: { x: 0, y: -.17, w: .24, h: .10 },
     region: { x0: -.44, x1: .44, y0: -.32, y1: .25 }, lid: '#e6bd82', brow: 'none', cheek: .65,
     sweat: { x: .36, y: .09, r: .029 }, tired: [.60, .55],
+  },
+  // The boss loaf's cut face: big, calm, dignified eyes (plans/EXECPLAN-BOSS.md 3).
+  ikkin: {
+    eyes: [{ x: -.28, y: .22, radius: [.13, .14, .07] }, { x: .28, y: .22, radius: [.13, .14, .07] }],
+    pupil: .045, open: [.78, .78], mouth: { x: 0, y: -.19, w: .32, h: .14 },
+    region: { x0: -.625, x1: .625, y0: -.40, y1: .56 }, lid: '#f2d09a', brow: 'up', cheek: .15,
+    sweat: { x: .49, y: .22, r: .035 }, tired: [.72, .72],
   },
 };
 // Pupil travel limits as a share of the eyeball's horizontal / vertical radius.

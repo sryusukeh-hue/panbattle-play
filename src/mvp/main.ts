@@ -1,5 +1,5 @@
 import './style.css';
-import { BREADS, BREAD_IDS, type BreadId, type Mode } from './config';
+import { BREADS, BREAD_IDS, BOSS_ID, type BreadId, type FighterId, type Mode } from './config';
 import { SPECIAL_RULE } from '../shared/rules';
 import { SPECIALS, METER_MAX, CUTIN_SECONDS } from '../shared/specials';
 import { Battle, DIFFICULTIES, DIFFICULTY, PRACTICE_SPECIAL_STAGE, movable, phase, type Difficulty, type Scores, type BattleEvent, type Side } from './battle';
@@ -9,8 +9,12 @@ import { SaveStore, rate } from './save';
 import { TableRenderer, type StanceCue } from './renderer';
 import { BattleAudio } from './audio';
 import { resultImage, shareResult } from './share';
+import { ChallengeStore, STAGES, finished, loseStage, newRun, offerAssist, recordClear, stageSeed, stageSetup, summary, winStage, type Run } from './challenge';
+import { INTRO_SECONDS, INTRO_SHORT_SECONDS, cuesBetween, introFrame } from './cinematic';
 
-type Screen = 'title' | 'permission' | 'calibrate' | 'select' | 'practice-intro' | 'practice' | 'practice-done' | 'countdown' | 'battle' | 'replay' | 'pause' | 'settings' | 'result' | 'error' | 'finish';
+type Screen = 'title' | 'permission' | 'calibrate' | 'select' | 'practice-intro' | 'practice' | 'practice-done' | 'countdown' | 'battle' | 'replay' | 'pause' | 'settings' | 'result' | 'error' | 'finish'
+  // 勝ち抜きチャレンジ (plans/EXECPLAN-BOSS.md): bread choice / continue, the ladder, the boss entrance, the champion ending, the run result.
+  | 'challenge' | 'ladder' | 'intro' | 'champion' | 'run-result';
 const app = document.querySelector<HTMLElement>('#app')!;
 app.innerHTML = `<div class="game-shell"><canvas id="table" aria-label="食卓で向かい合うパンの3D対戦画面"></canvas><div class="vignette"></div><div id="popups" aria-hidden="true"></div><div id="hud" hidden></div><div id="screen"></div><div id="banner" aria-hidden="true"></div><div id="cutin" aria-hidden="true"></div><div id="toast" role="status" aria-live="polite"></div><div id="controls" hidden><button data-control="left" aria-label="左へ移動">←</button><button data-control="attack">攻撃<span>軽くタップ</span></button><button data-control="right" aria-label="右へ移動">→</button></div><button id="special" type="button" hidden><span class="special-fill"></span><span class="special-text">ひっさつ</span></button><div id="save-warning" role="status"></div><div id="rotate" hidden><span>↻</span><h2>縦に持ってね</h2><p>対戦は止まっています。<br>縦に戻して「再開」を選んでください。</p></div></div>`;
 const canvas = document.querySelector<HTMLCanvasElement>('#table')!;
@@ -29,10 +33,18 @@ let renderer: TableRenderer | undefined; let ready = false; let fatal = ''; let 
 let practiceRequested = false; let calibrationReturn: Screen = 'select'; let permissionToken = 0; let permissionBusy = false;
 let countdown = 3; let last = performance.now(); let toastUntil = 0; let previousBest: Partial<Scores> = {};
 let practiceStage = 0; let acceptedAt: number | null = null;
-let stats = emptyStats(); let finishLeft = 0; let lastCount = 0; let thumbs: Partial<Record<BreadId, string>> = {};
+let stats = emptyStats(); let finishLeft = 0; let lastCount = 0; let thumbs: Partial<Record<FighterId, string>> = {};
+// Challenge state: the store, whether the current battle is a challenge stage, the entrance clock, the ending clock and the last stage's outcome.
+const challenge = new ChallengeStore(); let inChallenge = false; let challengeRequested = false; let challengePick: BreadId = 'shokupan';
+// Presentation clock for idle motion off the combat clock (breads bobbing, plate wobble): it stops while paused or hidden.
+let idleClock = 0;
+let introClock = 0; let introShort = false; let championClock = 0; let assistNext = false;
+// Champion ending length: the full 5 s storyboard, or a short still version under reduced motion.
+const championSeconds = (): number => reduced.matches ? 1.2 : 5;
+let stageOutcome: { won: boolean; score: number; timeUp: boolean; boss: boolean; stage: number } | null = null;
 let result: { score: number; rank: Rank; previous: number | null; tip: Tip } | null = null; let lastReject = 0;
 // A drill trains one skill and ends on it; pendingBegin resumes a match or drill after a forced recalibration.
-let drill: 0 | 1 | 2 | 3 = 0; let pendingBegin: { practice: boolean; stage: number; drill: 0 | 1 | 2 | 3 } | null = null;
+let drill: 0 | 1 | 2 | 3 = 0; let pendingBegin: { practice: boolean; stage: number; drill: 0 | 1 | 2 | 3; challenge?: boolean } | null = null;
 // Special meter presentation: last seen meter per side (for +gain popups and the MAX moment) and the practice goal.
 let meterSeen: Record<Side, number> = { player: 0, cpu: 0 }; let specialLanded = false; let cpuCharged = false;
 // Attack id whose landed-stage count ("nHIT!") was already shown, per side.
@@ -49,16 +61,17 @@ const testMode = import.meta.env.DEV && new URLSearchParams(location.search).get
 const reduced = matchMedia('(prefers-reduced-motion: reduce)');
 let notices: BattleEvent[] = [];
 let stallPause = true; // DEV test hook can disable it for screenshots taken by a throttled preview.
-const input = new GameInput(controls, () => { if (['battle', 'practice', 'countdown', 'replay'].includes(screen)) pause('一時停止'); });
+const input = new GameInput(controls, () => { if (['battle', 'practice', 'countdown', 'replay', 'intro', 'champion'].includes(screen)) pause('一時停止'); });
 input.sensor.attackSensitivity = save.data.attackSensitivity;
 input.sensor.tiltSensitivity = save.data.tiltSensitivity;
 input.bindSpecial(specialButton);
 const modes: Record<Mode, string> = { sensor: '振る・傾ける', touch: 'タッチ', keyboard: 'キーボード' };
-const emoji: Record<BreadId, string> = { shokupan: '🍞', francepan: '🥖', croissant: '🥐', melonpan: '🍈', currypan: '🍛', creampan: '🧤' };
+const emoji: Record<FighterId, string> = { shokupan: '🍞', francepan: '🥖', croissant: '🥐', melonpan: '🍈', currypan: '🍛', creampan: '🧤', ikkin: '👑' };
 // One-word role on each selection card, and how to dodge that bread's special (shown for the opponent you pick).
 const role: Record<BreadId, string> = { shokupan: 'バランス', francepan: 'ながい', croissant: '出がはやい', melonpan: 'よけてチャージ', currypan: '一発ドカン', creampan: '戻りがはやい' };
 // Written so the screen alone tells you what to do: the same line is the practice drill's instruction.
-const dodgeTip: Record<BreadId, string> = {
+const dodgeTip: Record<FighterId, string> = {
+  ikkin: '赤い枠の外へ！ 枠が消えたら反撃のチャンス',
   shokupan: '赤い四角の外へ！ 大きく横へ逃げよう', francepan: '赤い線の外へ！ 横へ逃げよう', croissant: '赤い三日月が消えるまで、横で待とう',
   melonpan: '赤い輪の外へ！ 輪が消えるまで、戻らず待とう', currypan: '赤い輪の外へ！ 丸が2つとも消えるまで、戻らず待とう', creampan: '横にはらうよ！ 矢印だけでなく、赤い輪の外まで逃げよう',
 };
@@ -129,8 +142,11 @@ function hurt(side: Side): void {
   if (element) restart(element, 'hurt');
 }
 function enterResult(): void {
-  renderer?.setEnding(battle.outcome === 'win' ? 'player' : battle.outcome === 'lose' ? 'cpu' : 'draw');
+  const champion = inChallenge && !!stageOutcome?.boss && stageOutcome.won;
+  renderer?.setEnding(battle.outcome === 'win' ? 'player' : battle.outcome === 'lose' ? 'cpu' : 'draw', !champion);
   if (battle.outcome) audio.cue(battle.outcome);
+  // The boss's defeat gets its own ending instead of the ordinary result sheet.
+  if (champion) { championClock = 0; renderer?.crownChampion(reduced.matches ? 0 : 1.5); transition('champion'); return; }
   transition('result');
 }
 function present(event: BattleEvent): void {
@@ -144,7 +160,7 @@ function flushNotices(active: boolean): void {
   if (active && stepNotice) { say(...stepNotice); stepNotice = null; return; }
   stepNotice = null;
   if (!active || !event) return;
-  if (event.kind === 'hit' || event.kind === 'clash') say(event.kind === 'clash' ? '相打ち！' : event.side === 'player' ? 'ヒット！' : '相手の攻撃がヒット');
+  if (event.kind === 'hit' || event.kind === 'clash') say(event.kind === 'clash' ? '相打ち！' : event.guard ? '耳でガードされた！ よけた後のスキをねらおう' : event.side === 'player' ? 'ヒット！' : '相手の攻撃がヒット', event.guard ? 1.6 : 1.2);
   if (event.kind === 'miss') say(event.special ? event.side === 'player' ? 'かわされた！ 戻るまで気をつけて' : 'ひっさつをかわした！' : event.side === 'player' ? '空振り · 少し中央に戻ろう' : '相手が空振り！');
   if (event.kind === 'dodge') say(event.special ? event.side === 'player' ? 'ひっさつ回避！ 今が反撃のチャンス！' : '相手がひっさつを回避！' : event.side === 'player' ? '回避成功！ 今が反撃の隙' : '相手が回避！', 1.3);
   if (event.kind === 'special') say(event.side === 'player' ? SPECIALS[battle.player.bread].shout : 'CPUのひっさつ！ 横へ回避！', 1.2);
@@ -162,13 +178,16 @@ function transition(next: Screen): void {
   if (!['battle', 'practice'].includes(next)) hideCutin();
   battle.setPaused(!['battle', 'practice'].includes(next));
   draw();
+  if (next === 'intro') audio.duck(Math.max(0, (introShort ? INTRO_SHORT_SECONDS : INTRO_SECONDS) - introClock));
   // Resuming mid cut-in continues the same overlay from where it stopped.
   if (['battle', 'practice'].includes(next) && battle.cutin) { showCutin(battle.cutin.side, CUTIN_SECONDS - battle.cutin.left); audio.duck(battle.cutin.left + .2); }
   if (!['battle', 'practice', 'countdown'].includes(next)) {
     const focus = screenElement.querySelector<HTMLElement>('h1,h2'); if (focus) { focus.tabIndex = -1; focus.focus({ preventScroll: true }); }
   } else (document.activeElement as HTMLElement | null)?.blur();
 }
-function showWarning(): void { warning.textContent = save.warning; warning.hidden = !save.warning; }
+// Both stores' problems stay on screen until a later write succeeds (a failed challenge save must never look saved).
+function showWarning(): void { const text = save.warning || challenge.warning; if (warning.textContent !== text) warning.textContent = text; warning.hidden = !text; }
+const keepNote = (): string => challenge.warning ? 'タイトルへ（保存できていません）' : 'タイトルへ（続きは保存されます）';
 function draw(): void {
   showWarning();
   app.dataset.mode = input.mode; specialButton.hidden = !['battle', 'practice'].includes(screen);
@@ -180,22 +199,24 @@ function draw(): void {
     app.dataset.screen = screen; hud.hidden = false; controls.hidden = true; screenElement.className = 'play-overlay';
     const ko = battle.player.hp <= 0 || battle.cpu.hp <= 0, text = ko ? 'K.O.!' : 'TIME UP';
     const status = document.querySelector<HTMLElement>('#battle-status'); if (status) { status.textContent = ''; status.className = 'status-line'; status.hidden = true; }
-    screenElement.innerHTML = `<div class="finish-banner ${battle.outcome ?? ''}"><strong>${text}</strong><span>${battle.outcome === 'win' ? 'YOU WIN' : battle.outcome === 'lose' ? 'CPU WINS' : 'DRAW'}</span></div><div class="replay-controls">${button('replay-skip', 'リプレイをスキップ →')}</div>`; return;
+    const boss = inChallenge && battle.cpu.bread === BOSS_ID, judged = !ko && battle.outcome === 'win';
+    const sub = battle.outcome === 'win' ? boss ? 'ボス撃破！' : judged ? '判定勝ち' : 'YOU WIN' : boss && !ko ? '時間切れ…' : battle.outcome === 'lose' ? 'CPU WINS' : 'DRAW';
+    screenElement.innerHTML = `<div class="finish-banner ${battle.outcome ?? ''}"><strong>${text}</strong><span>${sub}</span></div><div class="replay-controls">${button('replay-skip', 'リプレイをスキップ →')}</div>`; return;
   }
   const playing = ['battle', 'practice', 'countdown'].includes(screen);
   app.dataset.screen = screen;
   hud.hidden = !playing; controls.hidden = !['battle', 'practice'].includes(screen) || input.mode !== 'touch';
   screenElement.className = playing ? 'play-overlay' : `menu ${screen === 'title' ? 'title-screen' : ''}`;
   if (playing) {
-    hud.innerHTML = `<div class="topline"><span class="match-label">${screen === 'practice' ? 'ダメージなしの練習' : '食卓 / CPU戦'}</span><button data-action="pause" aria-label="一時停止">Ⅱ</button></div><div class="health-row"><img class="you-face" id="you-face" alt="" hidden><div class="health"><span>YOU · ${BREADS[battle.player.bread].name}</span><div class="health-track"><s id="player-ghost"></s><i id="player-health"></i></div><div class="meter" id="player-meter" role="img" aria-label="ひっさつゲージ"><i></i></div><b><span id="player-hp">100</span><em class="meter-tag" id="player-meter-tag"></em></b></div><div class="timer" id="timer">60</div><div class="health enemy"><span>CPU · ${BREADS[battle.cpu.bread].name}</span><div class="health-track"><s id="cpu-ghost"></s><i id="cpu-health"></i></div><div class="meter" id="cpu-meter" role="img" aria-label="CPUのひっさつゲージ"><i></i></div><b><em class="meter-tag" id="cpu-meter-tag"></em><span id="cpu-hp">100</span></b></div></div><div class="status-line" id="battle-status"></div>`;
+    hud.innerHTML = `<div class="topline"><span class="match-label">${screen === 'practice' ? 'ダメージなしの練習' : inChallenge ? battle.cpu.bread === BOSS_ID ? 'BOSS戦 · 6 / 6' : `勝ち抜き · ${(challenge.data.run?.stage ?? 0) + 1} / ${STAGES}` : '食卓 / CPU戦'}</span><button data-action="pause" aria-label="一時停止">Ⅱ</button></div><div class="health-row"><img class="you-face" id="you-face" alt="" hidden><div class="health"><span>YOU · ${BREADS[battle.player.bread].name}</span><div class="health-track"><s id="player-ghost"></s><i id="player-health"></i></div><div class="meter" id="player-meter" role="img" aria-label="ひっさつゲージ"><i></i></div><b><span id="player-hp">100</span><em class="meter-tag" id="player-meter-tag"></em></b></div><div class="timer" id="timer">${battle.limit}</div><div class="health enemy${battle.cpu.bread === BOSS_ID ? ' boss' : ''}"><span>${battle.cpu.bread === BOSS_ID ? '👑 BOSS' : 'CPU'} · ${BREADS[battle.cpu.bread].name}</span><div class="health-track"><s id="cpu-ghost"></s><i id="cpu-health"></i></div><div class="meter" id="cpu-meter" role="img" aria-label="CPUのひっさつゲージ"><i></i></div><b><em class="meter-tag" id="cpu-meter-tag"></em><span id="cpu-hp">100</span></b></div></div><div class="status-line" id="battle-status"></div>`;
     if (screen === 'countdown') lastCount = 0; // redraw restarts the number from the markup
-    if (screen === 'countdown') screenElement.innerHTML = `<div class="countdown"><span>構えて、相手を見よう</span><strong id="count">3</strong><em>${DIFFICULTY[battle.difficulty].label}CPU · ${BREADS[battle.cpu.bread].name}</em></div>`;
+    if (screen === 'countdown') screenElement.innerHTML = `<div class="countdown"><span>構えて、相手を見よう</span><strong id="count">3</strong><em>${inChallenge ? battle.cpu.bread === BOSS_ID ? `BOSS · ${BREADS[battle.cpu.bread].name} · ${battle.limit}秒` : `ステージ${(challenge.data.run?.stage ?? 0) + 1} · ${BREADS[battle.cpu.bread].name}${battle.assist ? ' · お助け' : ''}` : `${DIFFICULTY[battle.difficulty].label}CPU · ${BREADS[battle.cpu.bread].name}`}</em></div>`;
     else screenElement.innerHTML = `<div class="play-tip" id="play-tip"></div>`;
     updateHud(); return;
   }
   let html = '';
   if (screen === 'title') {
-    html = `<button class="sound-toggle" data-action="sound-toggle" aria-pressed="${save.data.sound}" aria-label="音 ${save.data.sound ? 'オン' : 'オフ'}">${save.data.sound ? '♪ ON' : '♪ OFF'}</button><div class="title-top"><div class="eyebrow">A LITTLE BATTLE ON THE TABLE</div><h1>パン<span>バトル</span><em>3D</em></h1><p>ひょいと避けて、<br>こんがり反撃。</p></div><div class="title-bottom"><div class="how"><span>↝ 軽く振って攻撃</span><span>↔ 傾けて回避</span></div>${button('play', ready ? '食卓で勝負する →' : fatal ? '読み込みを再試行' : 'パンを準備しています…')}<div class="button-pair">${button('practice-entry', '練習する', true)}${button('settings', '設定', true)}</div><small>縦持ち · 1対1 · 1試合60秒</small>${fatal ? `<p class="error-text">3D素材を読み込めませんでした。</p>` : ''}</div>`;
+    html = `<button class="sound-toggle" data-action="sound-toggle" aria-pressed="${save.data.sound}" aria-label="音 ${save.data.sound ? 'オン' : 'オフ'}">${save.data.sound ? '♪ ON' : '♪ OFF'}</button><div class="title-top"><div class="eyebrow">A LITTLE BATTLE ON THE TABLE</div><h1>パン<span>バトル</span><em>3D</em></h1><p>ひょいと避けて、<br>こんがり反撃。</p></div><div class="title-bottom"><div class="how"><span>↝ 軽く振って攻撃</span><span>↔ 傾けて回避</span></div>${button('play', ready ? '食卓で勝負する →' : fatal ? '読み込みを再試行' : 'パンを準備しています…')}${button('challenge-entry', '👑 勝ち抜きチャレンジ', true)}<div class="button-pair">${button('practice-entry', '練習する', true)}${button('settings', '設定', true)}</div><small>縦持ち · 1対1 · 1試合60秒</small>${fatal ? `<p class="error-text">3D素材を読み込めませんでした。</p>` : ''}</div>`;
   } else if (screen === 'permission') {
     html = `<section class="sheet">${header('01 / HOW TO PLAY', '手首で、パンを動かす', '軽いひと振りで攻撃。左右に傾けると回避。<br>攻撃を振り切る間は、横に動けません。')}<div class="instruction"><b>① 相手が引いたら、横へ</b><span>赤い狙いの輪と、パンの予備動作が合図。</span><b>② 避けたら、すぐ振る</b><span>相手の隙に当てると反撃ボーナス。</span></div><p class="gentle">小さな動きで十分です。しっかり持って遊ぼう。</p>${button('sensor', permissionBusy ? '許可と入力を確認中…' : '動きの利用を許可する')}<p id="permission-message" class="error-text" role="status"></p><details><summary>補助操作で遊ぶ</summary><div class="button-pair">${button('touch', 'タッチ操作', true)}${button('keyboard', 'キーボード', true)}</div></details>${button('title', 'タイトルへ', true)}</section>`;
   } else if (screen === 'calibrate') {
@@ -210,6 +231,18 @@ function draw(): void {
     html = `<section class="sheet">${header('TAKE A BREATH', 'ちょっと、ひと休み')}<p id="pause-message" class="status-box"></p>${button('resume', '再開する →')}${button('calibration', '構えを再調整', true)}${settingsFields()}${button('permission', '操作方式を選び直す', true)}<p class="minor">操作方式を変えると、この対戦は終了します。</p>${button('title', 'この対戦を終了してタイトルへ', true)}<small>途中終了の成績は保存されません。</small></section>`;
   } else if (screen === 'settings') {
     html = `<section class="sheet">${header('SETTINGS', '遊びやすい構えに')}${settingsFields()}<p class="minor">構え位置は対戦前・一時停止中に調整できます。</p>${button('settings-back', '戻る', true)}<p class="minor">設定・自己ベストはこのブラウザー内に保存。<br>オンラインでは操作と試合状態を対戦サーバーへ送ります。生センサー値は送りません。</p></section>`;
+  } else if (screen === 'result' && inChallenge && stageOutcome) {
+    html = challengeResult(stageOutcome);
+  } else if (screen === 'challenge') {
+    html = challengeSelect();
+  } else if (screen === 'ladder') {
+    html = ladder();
+  } else if (screen === 'intro') {
+    html = `<div class="intro-overlay" id="intro"><i class="bar top"></i><i class="bar bottom"></i><p class="intro-caption" id="intro-caption"></p><div class="intro-name" id="intro-name"><small>BOSS</small><strong>一斤食パン</strong><span>いっきんしょくパン · 食卓の王</span></div>${button('intro-skip', 'スキップ ›', true)}</div>`;
+  } else if (screen === 'champion') {
+    html = champion();
+  } else if (screen === 'run-result') {
+    html = runResult();
   } else if (screen === 'result') {
     const title = battle.outcome === 'win' ? 'こんがり、勝利！' : battle.outcome === 'lose' ? '次は、ひょいと回避。' : 'いい勝負、引き分け。';
     const dealt = Math.round(BREADS[battle.cpu.bread].hp - battle.cpu.hp), taken = Math.round(BREADS[battle.player.bread].hp - battle.player.hp);
@@ -219,7 +252,9 @@ function draw(): void {
     html = `<section class="sheet">${header('LET’S TRY AGAIN', '準備が止まっています')}<p class="error-text" id="fatal-message" role="alert"></p>${button('reload', '再読み込みして再試行')}${button('title', 'タイトルへ', true)}</section>`;
   }
   screenElement.innerHTML = html;
-  if (screen === 'result') {
+  // The entrance and the champion ending are drawn over the live 3D table, not on a blurred menu.
+  if (screen === 'intro' || screen === 'champion') screenElement.className = 'play-overlay';
+  if (screen === 'result' && !(inChallenge && stageOutcome)) {
     const diagnostics = screenElement.querySelector('.diagnostics')!;
     diagnostics.insertAdjacentHTML('beforebegin', `${button('share', '結果を画像で共有・保存', true)}<p class="minor">共有先は端末の画面で選べます。非対応なら画像を保存します。</p>`); updateShareButton();
   }
@@ -227,6 +262,7 @@ function draw(): void {
   if (messageElement) messageElement.textContent = screen === 'error' ? fatal : message;
   const sensorButton = screenElement.querySelector<HTMLButtonElement>('[data-action="sensor"]'); if (sensorButton) sensorButton.disabled = permissionBusy;
   if (screen === 'title' && !ready && !fatal) screenElement.querySelector<HTMLButtonElement>('[data-action="play"]')!.disabled = true;
+  if (screen === 'title' && !ready) for (const name of ['challenge-entry']) screenElement.querySelector<HTMLButtonElement>(`[data-action="${name}"]`)!.disabled = true;
 }
 function settingsFields(): string {
   return `<label class="setting">音を鳴らす<input type="checkbox" id="sound" ${save.data.sound ? 'checked' : ''}></label><label class="setting">BGM（音がオンのとき）<input type="checkbox" id="music" ${save.data.music ?? true ? 'checked' : ''}></label>${([
@@ -284,7 +320,8 @@ function updateYouFace(): void {
 function updateHud(): void {
   const p = document.querySelector<HTMLElement>('#player-health'), c = document.querySelector<HTMLElement>('#cpu-health');
   if (!p || !c) return;
-  p.style.width = `${battle.player.hp}%`; c.style.width = `${battle.cpu.hp}%`;
+  const pct = (side: Side): number => clamp01(battle[side].hp / BREADS[battle[side].bread].hp) * 100;
+  p.style.width = `${pct('player')}%`; c.style.width = `${pct('cpu')}%`;
   for (const side of ['player', 'cpu'] as const) {
     const meter = battle[side].meter ?? 0, full = meter >= METER_MAX, element = document.querySelector<HTMLElement>(`#${side}-meter`);
     if (!element) continue;
@@ -297,11 +334,12 @@ function updateHud(): void {
   specialButton.classList.toggle('ready', ready); specialButton.classList.toggle('busy', meter >= METER_MAX && !ready && !drillDodge());
   specialButton.style.setProperty('--fill', `${meter}%`); specialButton.setAttribute('aria-disabled', String(!ready));
   const specialText = specialButton.querySelector<HTMLElement>('.special-text')!; if (specialText.textContent !== label) specialText.textContent = label;
-  document.querySelector<HTMLElement>('#player-ghost')!.style.width = `${battle.player.hp}%`; document.querySelector<HTMLElement>('#cpu-ghost')!.style.width = `${battle.cpu.hp}%`;
+  document.querySelector<HTMLElement>('#player-ghost')!.style.width = `${pct('player')}%`; document.querySelector<HTMLElement>('#cpu-ghost')!.style.width = `${pct('cpu')}%`;
+  c.closest('.health')?.classList.toggle('heated', battle.bossPhase === 2);
   p.closest('.health')?.classList.toggle('critical', battle.player.hp > 0 && battle.player.hp <= 25);
   document.querySelector('#player-hp')!.textContent = String(Math.ceil(battle.player.hp)); document.querySelector('#cpu-hp')!.textContent = String(Math.ceil(battle.cpu.hp));
-  document.querySelector('#timer')!.textContent = screen === 'practice' ? '∞' : String(Math.max(0, Math.ceil(60 - battle.elapsed)));
-  document.querySelector('#timer')!.classList.toggle('urgent', screen === 'battle' && battle.elapsed >= 50 && !battle.outcome);
+  document.querySelector('#timer')!.textContent = screen === 'practice' ? '∞' : String(Math.max(0, Math.ceil(battle.limit - battle.elapsed)));
+  document.querySelector('#timer')!.classList.toggle('urgent', screen === 'battle' && battle.elapsed >= battle.limit - 10 && !battle.outcome);
   const status = document.querySelector<HTMLElement>('#battle-status')!;
   const threat = phase(battle.cpu) === 'windup', locked = !movable(battle.player);
   const cpuSpecial = !!battle.cpu.attack?.special && ['windup', 'active'].includes(phase(battle.cpu)), mine = !!battle.player.attack?.special && ['windup', 'active'].includes(phase(battle.player));
@@ -329,7 +367,7 @@ function stanceCue(): StanceCue {
   return p === 'windup' || p === 'active' || !movable(battle.player) || battle.player.recoil > 0 ? 'locked' : battle.canSpecial('player') ? 'charged' : battle.counterAvailable && battle.elapsed < battle.counterUntil ? 'counter' : p === 'recovery' ? 'recovery' : 'ready';
 }
 function pause(reason: string): void {
-  if (!['battle', 'practice', 'countdown', 'replay'].includes(screen)) return;
+  if (!['battle', 'practice', 'countdown', 'replay', 'intro', 'champion'].includes(screen)) return;
   resumeScreen = screen; message = reason; audio.silence(); transition('pause');
 }
 function fail(reason: string): void { fatal = reason; ready = false; transition('error'); }
@@ -337,17 +375,98 @@ function begin(practice: boolean, stage = 0, only: 0 | 1 | 2 | 3 = 0): void {
   if (!ready) { fail('パンの読み込みが完了していません。再試行してください。'); return; }
   if (input.mode === 'sensor' && (!input.sensor.fresh(performance.now()) || input.sensor.baseline === null)) { message = '新しい入力と構え位置を確認してください。'; calibrationReturn = 'select'; pendingBegin = { practice, stage, drill: only }; transition('calibrate'); return; }
   battle = new Battle(save.data.bread, save.data.cpu, { practice, seed: practice || testMode ? 42 : crypto.getRandomValues(new Uint32Array(1))[0]!, difficulty: level() });
+  inChallenge = false; freshMatch(stage); drill = practice ? only : 0;
+  if (practice && stage === PRACTICE_SPECIAL_STAGE) battle.enterSpecialPractice();
+  meterSeen = { player: battle.player.meter ?? 0, cpu: battle.cpu.meter ?? 0 };
+  if (practice) transition('practice'); else { countdown = 3; transition('countdown'); }
+}
+// Per-match resets shared by free battles and challenge stages.
+function freshMatch(stage = 0): void {
   stats = emptyStats(); result = null; lastCount = 0; popups.replaceChildren();
   shareGeneration++; shareFile = null; sharePreparing = shareFailed = sharing = false;
-  previousBest = {}; input.clear(); input.resetMetrics(); renderer?.resetMetrics(); practiceStage = stage; battle.practiceStage = stage; drill = practice ? only : 0; pendingBegin = null; toast.textContent = '';
-  if (practice && stage === PRACTICE_SPECIAL_STAGE) battle.enterSpecialPractice();
-  meterSeen = { player: battle.player.meter ?? 0, cpu: battle.cpu.meter ?? 0 }; specialLanded = false; cpuCharged = false; hitsShown = { player: -1, cpu: -1 }; hideCutin();
-  if (practice) transition('practice'); else { countdown = 3; transition('countdown'); }
+  previousBest = {}; input.clear(); input.resetMetrics(); renderer?.resetMetrics(); practiceStage = stage; battle.practiceStage = stage; drill = 0; pendingBegin = null; toast.textContent = '';
+  meterSeen = { player: 0, cpu: 0 }; specialLanded = false; cpuCharged = false; hitsShown = { player: -1, cpu: -1 }; phaseSeen = false; hideCutin();
+}
+const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
+// The boss's second-form toasting, ramping in over .6 s from the moment it began.
+const heat = (): number => battle.phaseShiftAt < 0 ? 0 : clamp01((battle.elapsed - battle.phaseShiftAt) / .6);
+let phaseSeen = false;
+// --- 勝ち抜きチャレンジ ---
+const crown = (id: BreadId): string => { const r = challenge.data.records[id]; return r ? `<em class="crown${r.perfect ? ' perfect' : ''}" aria-label="クリア ${r.clears}回${r.perfect ? '・ノーコンティニュー' : ''}">👑</em>` : ''; };
+const face = (id: FighterId, extra = ''): string => thumbs[id] ? `<img class="bread-thumb${extra}" src="${thumbs[id]}" alt="">` : `<span class="bread-emoji${extra}">${emoji[id]}</span>`;
+const liveRun = (): Run | null => { const run = challenge.data.run; return run && !finished(run) ? run : null; };
+function challengeSelect(): string {
+  const run = liveRun();
+  const resume = run ? `<div class="run-resume"><b>つづきから</b><span>${face(run.bread)}${BREADS[run.bread].name} · ステージ ${run.stage + 1} / ${STAGES}${run.retries ? ` · 再挑戦 ${run.retries}回` : ''}</span>${button('challenge-continue', 'つづきから遊ぶ →')}</div><p class="minor">下でパンを選んで「はじめから」にすると、この記録は終わります。</p>` : '';
+  return `<section class="sheet selection challenge">${header('KACHINUKI CHALLENGE', '勝ち抜きチャレンジ', '5つのパンに勝ち抜いて、<br>最後のボスに挑もう。')}${resume}<div class="bread-grid">${BREAD_IDS.map(id => `<button data-bread="${id}" aria-pressed="${challengePick === id}" class="bread-card">${face(id)}<b>${BREADS[id].name}</b><small>${role[id]}</small><i>${challengePick === id ? '✓' : ''}</i>${crown(id)}</button>`).join('')}</div><p class="minor">勝つたびに相手が強くなります · 負けても同じステージから何度でも · 最後は90秒のボス戦</p>${button('challenge-start', run ? `${BREADS[challengePick].name}で はじめから →` : `${BREADS[challengePick].name}で 挑戦する →`, !!run)}${button('title', 'タイトルへ', true)}</section>`;
+}
+function ladder(): string {
+  const run = liveRun();
+  if (!run) return challengeSelect();
+  const setup = stageSetup(run, run.stage), next = BREADS[setup.opponent];
+  const rows = run.order.map((id, i) => {
+    const state = i < run.stage ? 'done' : i === run.stage ? 'next' : 'later', hidden = id === BOSS_ID && i > run.stage;
+    return `<li class="rung ${state}${id === BOSS_ID ? ' boss' : ''}"><span class="rung-no">${id === BOSS_ID ? 'BOSS' : i + 1}</span>${face(id, hidden ? ' silhouette' : '')}<b>${hidden ? '？？？' : BREADS[id].name}</b><em>${state === 'done' ? '✓ 勝ち' : state === 'next' ? 'つぎ！' : ''}</em></li>`;
+  }).reverse().join('');
+  const cheer = run.order.slice(0, run.stage).map(id => face(id, ' cheer')).join('');
+  const assist = offerAssist(run) ? `<button class="assist" data-action="assist-toggle" aria-pressed="${assistNext}">お助け：予告をゆっくりにする ${assistNext ? 'ON' : 'OFF'}</button><p class="minor">お助けを使うと、ランクSはつきません。</p>` : '';
+  const tip = setup.boss ? `<p class="status-box boss-tip">かたい耳で、ふつうの攻撃はほとんど効かない！<br>${dodgeTip.ikkin}<br>HP${next.hp} · 90秒で倒しきろう</p>` : `<p class="status-box">相手のひっさつ「${SPECIALS[setup.opponent].name}」<br>${dodgeTip[setup.opponent]}</p>`;
+  const replayIntro = setup.boss && challenge.data.seenIntro ? button('intro-replay', '登場をもう一度見る', true) : '';
+  return `<section class="sheet ladder-sheet">${header(`STAGE ${run.stage + 1} / ${STAGES}`, setup.boss ? 'ついに、ボス戦！' : `つぎは ${next.name}`, `あなた：${BREADS[run.bread].name}${run.retries ? ` · 再挑戦 ${run.retries}回` : ''}`)}<ol class="ladder">${rows}</ol>${cheer ? `<div class="cheer"><small>応援席</small>${cheer}</div>` : ''}${tip}${assist}${button('fight-stage', setup.boss ? 'ボスに挑む →' : 'たたかう →')}${replayIntro}${button('title', keepNote(), true)}</section>`;
+}
+function challengeResult(o: NonNullable<typeof stageOutcome>): string {
+  const run = challenge.data.run, rank = result ? `<div class="rank-card rank-${result.rank}"><div class="rank-letter" role="img" aria-label="ランク ${result.rank}">${result.rank}</div><div class="rank-score"><small>SCORE</small><b>${result.score}</b><span>ステージ${o.stage + 1}</span></div></div>` : '';
+  if (o.won) return `<section class="sheet result">${header(`STAGE ${o.stage + 1} CLEAR`, o.timeUp ? '判定勝ち！' : `${BREADS[battle.cpu.bread].name}に勝利！`)}${rank}${button('next-stage', run && run.stage === STAGES - 1 ? 'ボス戦へ →' : '次の相手へ →')}${result ? `<div class="next-tip"><b>次のコツ</b>${result.tip.text}</div>` : ''}${button('title', keepNote(), true)}</section>`;
+  const title = o.boss && o.timeUp ? '時間切れ… ボスを倒しきろう' : o.boss ? 'ボスは手ごわい！' : battle.outcome === 'draw' ? '引き分け、もう一回！' : 'もう一回！';
+  const assist = run && offerAssist(run) ? `<p class="status-box">何度でも挑戦できます。進行画面で「お助け」も使えます。</p>` : '';
+  return `<section class="sheet result">${header('TRY AGAIN', title, '同じステージから、何度でも挑戦できます。')}${result ? `<div class="next-tip"><b>次のコツ</b>${result.tip.text}</div>` : ''}${assist}${button('retry-stage', 'もう一度たたかう →')}${button('next-stage', '進行画面へ', true)}${button('title', keepNote(), true)}</section>`;
+}
+function champion(): string {
+  const run = challenge.data.run, beaten = run ? run.order.filter(id => id !== BOSS_ID) : [];
+  return `<div class="champion" id="champion" style="--seek:${(-championClock).toFixed(2)}s"><div class="champion-title"><small>BOSS DEFEATED</small><strong>食卓チャンピオン！</strong><span>${run ? BREADS[run.bread].name : ''}が 一斤食パンに勝った！</span></div><div class="cheer champion-cheer">${beaten.map((id, i) => `<span style="--i:${i}">${face(id, ' cheer')}</span>`).join('')}</div><div class="replay-controls">${button('champion-next', '結果を見る →')}</div></div>`;
+}
+function runResult(): string {
+  const run = challenge.data.run;
+  if (!run) return challengeSelect();
+  const s = summary(run), record = challenge.data.records[run.bread], minutes = Math.floor(run.playSeconds / 60), seconds = Math.round(run.playSeconds % 60);
+  const marks = run.order.map(id => `<span class="mark${id === BOSS_ID ? ' boss' : ''}">${face(id)}</span>`).join('');
+  return `<section class="sheet result run-result">${header('CHALLENGE CLEAR', '勝ち抜き、達成！', `${BREADS[run.bread].name}で 6 / 6 クリア`)}<div class="rank-card rank-${s.rank ?? 'D'}"><div class="rank-letter" role="img" aria-label="ランク ${s.rank}">${s.rank}</div><div class="rank-score"><small>TOTAL</small><b>${s.total}</b><span>${record && record.best === s.total ? 'ベスト記録！' : record ? `ベスト ${record.best}` : ''}</span></div></div><div class="clear-marks">${marks}</div><div class="stat-grid">${stat('再挑戦', `${run.retries}<small>回</small>`)}${stat('反撃', String(s.counters))}${stat('回避率', s.dodgeRate === null ? '—' : `${Math.round(s.dodgeRate * 100)}<small>%</small>`)}${stat('時間', `${minutes}:${String(seconds).padStart(2, '0')}`)}</div>${run.retries === 0 && !run.assist ? '<p class="status-box perfect-note">👑 ノーコンティニュー！ 金の王冠をゲット</p>' : '<p class="minor">ノーコンティニューで、金縁の王冠がもらえます。</p>'}${button('challenge-again', 'もう一度チャレンジ →')}${button('title', 'タイトルへ', true)}</section>`;
+}
+function beginStage(): void {
+  const run = liveRun();
+  if (!run) { transition('challenge'); return; }
+  if (!ready) { fail('パンの読み込みが完了していません。再試行してください。'); return; }
+  if (input.mode === 'sensor' && (!input.sensor.fresh(performance.now()) || input.sensor.baseline === null)) { message = '新しい入力と構え位置を確認してください。'; calibrationReturn = 'ladder'; pendingBegin = { practice: false, stage: 0, drill: 0, challenge: true }; transition('calibrate'); return; }
+  const setup = stageSetup(run, run.stage);
+  if (assistNext && !run.assist) challenge.update(d => ({ ...d, run: { ...run, assist: true } }));
+  battle = new Battle(run.bread, setup.opponent, { seed: testMode ? 42 : stageSeed(run), profile: setup.profile, limit: setup.limit, assist: assistNext });
+  inChallenge = true; stageOutcome = null; freshMatch(); renderer?.preparePortraits(run.bread);
+  if (setup.boss) { introShort = challenge.data.seenIntro || reduced.matches; introClock = 0; transition('intro'); }
+  else { countdown = 3; transition('countdown'); }
+}
+function finishIntro(): void {
+  if (!challenge.data.seenIntro) challenge.update(d => ({ ...d, seenIntro: true }));
+  countdown = 3; transition('countdown'); say('よけたら、反撃！', 1.5);
+}
+// One write per stage: the result and the next stage (or the retry count) land together, plus the clear record.
+function settleStage(): void {
+  const run = liveRun(); if (!run || !battle.outcome) return;
+  const won = battle.outcome === 'win', boss = battle.cpu.bread === BOSS_ID;
+  const input_ = { outcome: battle.outcome, hpRatio: battle.player.hp / BREADS[battle.player.bread].hp, scores: battle.scores, stats }, score = matchScore(input_);
+  result = { score, rank: rankOf(score, input_), previous: null, tip: nextTip(input_, false) };
+  stageOutcome = { won, score, timeUp: battle.player.hp > 0 && battle.cpu.hp > 0, boss, stage: run.stage };
+  const next = won ? winStage(run, { score, dodge: battle.scores.dodge.success, chances: battle.scores.dodge.opportunities, counters: stats.player.counters, seconds: Math.round(battle.elapsed * 10) / 10 })
+    : loseStage(run, battle.elapsed);
+  challenge.update(d => ({ ...d, run: next, records: recordClear(d.records, next) }));
+  if (won) assistNext = false;
+  if (challenge.warning) say(challenge.warning, 3);
+  prepareShare(); finishLeft = reduced.matches ? .5 : .9; transition('finish');
 }
 async function action(actionName: string): Promise<void> {
   audio.unlock();
-  if (actionName === 'play' || actionName === 'practice-entry') {
+  if (actionName === 'play' || actionName === 'practice-entry' || actionName === 'challenge-entry') {
     if (!ready) { if (fatal) location.reload(); return; }
+    challengeRequested = actionName === 'challenge-entry'; challengePick = liveRun()?.bread ?? save.data.bread;
     practiceRequested = actionName === 'practice-entry'; message = ''; transition('permission');
   } else if (actionName === 'sensor') {
     if (permissionBusy) return;
@@ -356,13 +475,22 @@ async function action(actionName: string): Promise<void> {
     catch (e) { if (token === permissionToken && screen === 'permission') { message = e instanceof Error ? e.message : '許可を確認できませんでした。'; permissionBusy = false; draw(); } }
   } else if (actionName === 'touch' || actionName === 'keyboard') { input.mode = actionName; calibrationReturn = 'select'; transition('calibrate');
   } else if (actionName === 'calibrated' && pendingBegin && input.mode === 'sensor' && input.sensor.calibrate(performance.now())) {
-    const resume = pendingBegin; begin(resume.practice, resume.stage, resume.drill);
+    const resume = pendingBegin; if (resume.challenge) beginStage(); else begin(resume.practice, resume.stage, resume.drill);
   } else if (actionName === 'calibrated') {
     if (input.mode === 'sensor' && !input.sensor.calibrate(performance.now())) { document.querySelector('#calibration-message')!.textContent = '新しい入力が届いていません。もう一度確認するか補助操作を選んでください。'; return; }
-    transition(calibrationReturn);
+    transition(challengeRequested && calibrationReturn === 'select' ? 'challenge' : calibrationReturn);
   } else if (actionName === 'calibration') { calibrationReturn = screen === 'pause' ? 'pause' : 'select'; transition('calibrate');
   } else if (actionName === 'permission') { message = ''; pendingBegin = null; transition('permission');
-  } else if (actionName === 'title') { pendingBegin = null; renderer?.setEnding(null); battle = new Battle(save.data.bread, save.data.cpu); practiceRequested = false; transition('title');
+  } else if (actionName === 'challenge-start') { challenge.update(d => ({ ...d, run: newRun(challengePick, input.mode, testMode ? 7 : crypto.getRandomValues(new Uint32Array(1))[0]!) })); assistNext = false; transition('ladder');
+  } else if (actionName === 'challenge-continue') { assistNext = false; transition('ladder');
+  } else if (actionName === 'challenge-again') { challengePick = challenge.data.run?.bread ?? challengePick; renderer?.setEnding(null); inChallenge = false; transition('challenge');
+  } else if (actionName === 'fight-stage' || actionName === 'retry-stage') { renderer?.setEnding(null); beginStage();
+  } else if (actionName === 'next-stage') { renderer?.setEnding(null); inChallenge = false; transition(liveRun() ? 'ladder' : 'challenge');
+  } else if (actionName === 'assist-toggle') { assistNext = !assistNext; draw(); screenElement.querySelector<HTMLElement>('[data-action="assist-toggle"]')?.focus();
+  } else if (actionName === 'intro-skip' && screen === 'intro') { introClock = introShort ? INTRO_SHORT_SECONDS : INTRO_SECONDS; finishIntro();
+  } else if (actionName === 'intro-replay') { challenge.update(d => ({ ...d, seenIntro: false })); beginStage();
+  } else if (actionName === 'champion-next' && screen === 'champion') { renderer?.tiltEnding(); transition('run-result');
+  } else if (actionName === 'title') { pendingBegin = null; inChallenge = false; challengeRequested = false; renderer?.setEnding(null); battle = new Battle(save.data.bread, save.data.cpu); practiceRequested = false; transition('title');
   } else if (actionName === 'select') { pendingBegin = null; renderer?.setEnding(null); practiceRequested = false; battle = new Battle(save.data.bread, save.data.cpu); transition('select');
   } else if (actionName === 'start') { save.persist(); if (practiceRequested || !save.data.practiced) transition('practice-intro'); else begin(false);
   } else if (actionName === 'practice-start') begin(true);
@@ -398,6 +526,9 @@ app.addEventListener('click', e => {
     screenElement.querySelector<HTMLElement>(`[data-difficulty="${save.data.difficulty}"]`)?.focus(); return;
   }
   if (target?.dataset.action) void action(target.dataset.action);
+  if (target?.dataset.bread && screen === 'challenge' && BREAD_IDS.includes(target.dataset.bread as BreadId)) {
+    challengePick = target.dataset.bread as BreadId; draw(); screenElement.querySelector<HTMLElement>(`[data-bread="${challengePick}"]`)?.focus(); return;
+  }
   if (target?.dataset.bread && screen === 'select') {
     save.data.bread = target.dataset.bread as BreadId; save.persist(); battle = new Battle(save.data.bread, save.data.cpu); renderer?.preparePortraits(save.data.bread); draw();
     screenElement.querySelector<HTMLElement>(`[data-bread="${save.data.bread}"]`)?.focus();
@@ -429,8 +560,9 @@ function frame(now: number): void {
   requestAnimationFrame(frame);
   const dt = stallPause ? (now - last) / 1000 : Math.min(.1, (now - last) / 1000); last = now;
   if (toastUntil < now) toast.textContent = '';
-  audio.music(['countdown', 'battle', 'practice', 'finish'].includes(screen) && !document.hidden, screen === 'battle' && battle.elapsed >= 50);
+  audio.music(['countdown', 'battle', 'practice', 'finish', 'intro'].includes(screen) && !document.hidden, screen === 'battle' && battle.elapsed >= battle.limit - 10);
   if (dt > .25) pause('描画が中断したので一時停止しました。');
+  if (screen !== 'pause' && !document.hidden) idleClock += Math.min(dt, .1);
   if (!rotate.hidden && !isLandscape()) rotate.hidden = true;
   if (screen === 'finish') {
     if (!document.hidden && renderer) {
@@ -438,6 +570,29 @@ function frame(now: number): void {
       try { renderer.render(battle, battle.elapsed, Math.min(dt, .1), true, undefined, .3); updateYouFace(); }
       catch { fail('3D画面を描画できません。再読み込みを試してください。'); return; }
       if (finishLeft <= 0) { if (renderer.startReplay()) transition('replay'); else enterResult(); }
+    }
+    return;
+  }
+  if (screen === 'intro') {
+    if (!document.hidden && renderer && !isLandscape()) {
+      const before = introClock; introClock += Math.min(dt, .1);
+      const f = introFrame(introClock, introShort);
+      for (const cue of cuesBetween(before, introClock, introShort)) { audio.boss(cue); if (cue === 'thud') renderer.introImpact(); }
+      const overlay = document.querySelector<HTMLElement>('#intro');
+      if (overlay) {
+        overlay.style.setProperty('--bars', String(f.letterbox)); overlay.style.setProperty('--dim', String(f.dim)); overlay.style.setProperty('--title', String(f.title));
+        const caption = document.querySelector<HTMLElement>('#intro-caption')!; if (caption.textContent !== f.caption) caption.textContent = f.caption;
+      }
+      try { renderer.render(battle, idleClock, Math.min(dt, .1), false, { intro: f }); } catch { fail('3D画面を描画できません。再読み込みを試してください。'); return; }
+      if (f.done) finishIntro();
+    }
+    return;
+  }
+  if (screen === 'champion') {
+    if (!document.hidden && renderer) {
+      championClock += Math.min(dt, .1); renderer.tickEnding(Math.min(dt, .1));
+      try { renderer.render(battle, idleClock, 0, false); } catch { fail('3D画面を描画できません。再読み込みを試してください。'); return; }
+      if (championClock >= championSeconds()) { renderer.tiltEnding(); transition('run-result'); }
     }
     return;
   }
@@ -488,6 +643,9 @@ function frame(now: number): void {
       // Only a special fired in the drill's "fire" step completes stage 4.
       if (event.kind === 'special-hit' && event.side === 'player' && practiceStage === PRACTICE_SPECIAL_STAGE && battle.specialStep === 'fire') specialLanded = true;
       present(event);
+      if (event.kind === 'hit' && event.guard) popup('cpu', 'カキン！', 'combo', 1.3);
+      // Against the boss, a clean dodge is the moment to strike: say it right on the loaf.
+      if (battle.cpu.bread === BOSS_ID && event.kind === 'dodge' && event.side === 'player') popup('cpu', 'いま！', 'counter', 1.2);
       if (screen === 'practice') {
         if (practiceStage === 0 && event.kind === 'hit' && event.side === 'player') { practiceStage = 1; battle.practiceStage = 1; say('攻撃できました！ 次は横に回避', 2); }
         else if (practiceStage === 1 && event.kind === 'dodge' && event.side === 'player') { if (drill === 1) transition('practice-done'); else { practiceStage = 2; battle.practiceStage = 2; } }
@@ -509,7 +667,10 @@ function frame(now: number): void {
       if (phase(fighter) !== 'recovery' && !battle.outcome) continue;
       hitsShown[side] = attack.id; popup(side === 'player' ? 'cpu' : 'player', `${landedStages(side)}HIT!`, 'combo', 1.25);
     }
-    if (battle.cpuCharging && !cpuCharged) { cpuCharged = true; banner('CPUが本気だ！', 'rage'); say(RAGE_TIP, 1.8); }
+    if (battle.cpuCharging && !cpuCharged) { cpuCharged = true; banner(battle.bossPhase ? 'プレスが来る！' : 'CPUが本気だ！', 'rage'); say(RAGE_TIP, 1.8); }
+    // The boss charges more than once; each new charge is announced again.
+    if (!battle.cpuCharging && cpuCharged && battle.bossPhase) cpuCharged = false;
+    if (battle.bossPhase === 2 && !phaseSeen) { phaseSeen = true; banner('焼きたてモード！', 'rage'); say('ボスが熱くなった！ 攻撃の間かくが短くなるよ', 2); }
     // The special drill ends once a special has landed and finished, so the whole move plays out.
     if (screen === 'practice' && practiceStage === PRACTICE_SPECIAL_STAGE && battle.specialStep === 'fire' && specialLanded && !battle.player.attack?.special) {
       save.data.practicedSpecial = true; save.persist(); transition('practice-done');
@@ -520,10 +681,14 @@ function frame(now: number): void {
   flushNotices(screen === 'battle' || screen === 'practice');
   if (ready && renderer && !document.hidden) {
     try {
-      renderer.render(battle, active ? battle.elapsed : now / 1000, active ? Math.min(dt, .1) : 0, active && !battle.paused, { ...(battle.practice ? {} : { remaining: 60 - battle.elapsed }), cue: stanceCue(), frozen: battle.freezing, charging: battle.cpuCharging });
+      // A paused entrance keeps showing its current frame; result screens advance the ending pose clock.
+      if (['result', 'run-result'].includes(screen)) renderer.tickEnding(Math.min(dt, .1));
+      const heldIntro = screen === 'pause' && resumeScreen === 'intro' ? introFrame(introClock, introShort) : null;
+      renderer.render(battle, active ? battle.elapsed : idleClock, active ? Math.min(dt, .1) : 0, active && !battle.paused, { ...(battle.practice ? {} : { remaining: battle.limit - battle.elapsed }), cue: stanceCue(), frozen: battle.freezing, charging: battle.cpuCharging, heat: heat(), intro: heldIntro });
       if (acceptedAt !== null) { renderer.noteLatency(performance.now() - acceptedAt); acceptedAt = null; }
       updateYouFace();
-      if (battle.outcome && screen === 'battle') {
+      if (battle.outcome && screen === 'battle' && inChallenge) settleStage();
+      else if (battle.outcome && screen === 'battle') {
         previousBest = save.record(battle, input.mode);
         const input_ = { outcome: battle.outcome, hpRatio: battle.player.hp / BREADS[battle.player.bread].hp, scores: battle.scores, stats }, score = matchScore(input_);
         result = { score, rank: rankOf(score, input_), previous: save.recordScore(battle, input.mode, score), tip: nextTip(input_, battle.difficulty === 'hard') };
@@ -542,5 +707,5 @@ try {
 // Read-only diagnostics for device QA. Sensor raw values are never persisted or transmitted.
 Object.defineProperty(window, '__panDiagnostics', { value: () => ({ screen, mode: input.mode, ready, elapsed: battle.elapsed, hp: [battle.player.hp, battle.cpu.hp], scores: structuredClone(battle.scores), metrics: renderer?.metrics(), sensorMetrics: input.metrics(), sensorAttacks: input.sensor.attacks, attackSensitivity: input.sensor.attackSensitivity, tiltSensitivity: input.sensor.tiltSensitivity }) });
 if (import.meta.env.DEV && new URLSearchParams(location.search).get('test') === '1') {
-  Object.defineProperty(window, '__panTest', { value: { get battle() { return battle; }, get input() { return input; }, get screen() { return screen; }, get save() { return save; }, get renderer() { return renderer; }, action, transition, pause, set stallPause(value: boolean) { stallPause = value; } } });
+  Object.defineProperty(window, '__panTest', { value: { get battle() { return battle; }, get input() { return input; }, get screen() { return screen; }, get save() { return save; }, get challenge() { return challenge; }, set introClock(value: number) { introClock = value; }, get renderer() { return renderer; }, action, transition, pause, set stallPause(value: boolean) { stallPause = value; } } });
 }

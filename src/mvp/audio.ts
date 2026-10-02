@@ -1,8 +1,9 @@
 import type { BattleSound } from './feedback';
-import { BREAD_IDS, type BreadId } from './config';
+import { BREAD_IDS, type BreadId, type FighterId } from './config';
 import { CUES, TEMPO, frequencyOf, notesAt, type Cue } from './music';
+import type { IntroCue } from './cinematic';
 
-const breadTone: Record<BreadId, readonly [number, number]> = { shokupan: [1, 650], francepan: [.72, 1400], croissant: [1.35, 2300], melonpan: [.92, 1800], currypan: [.82, 3400], creampan: [1.18, 850] };
+const breadTone: Record<FighterId, readonly [number, number]> = { shokupan: [1, 650], francepan: [.72, 1400], croissant: [1.35, 2300], melonpan: [.92, 1800], currypan: [.82, 3400], creampan: [1.18, 850], ikkin: [.6, 420] };
 export async function loadHitSound(audio: Pick<AudioContext, 'decodeAudioData'>, bread: BreadId): Promise<AudioBuffer | null> {
   for (const extension of ['m4a', 'mp3']) {
     try {
@@ -22,11 +23,13 @@ const tones: Record<Exclude<BattleSound, SpecialSound>, [number, number, number,
   heartbeat: [85, 55, .26, 'sine'],
 };
 // Special voices (EXECPLAN-SPECIAL 5.5): signature rise before the major-triad sparkle, and the landing thud.
-const specialRise: Record<BreadId, [number[], number, number]> = {
+const specialRise: Record<FighterId, [number[], number, number]> = {
+  ikkin: [[90, 120, 180], .30, 261.63],
   shokupan: [[180, 360], .22, 523.25], francepan: [[500, 1400], .20, 659.25], croissant: [[700, 950, 1200], .21, 783.99],
   melonpan: [[240, 360, 480], .21, 587.33], currypan: [[220, 440, 880], .21, 392.00], creampan: [[440, 660], .20, 698.46],
 };
-const specialLand: Record<BreadId, [number, number, number, number]> = {
+const specialLand: Record<FighterId, [number, number, number, number]> = {
+  ikkin: [95, 32, .26, 380],
   shokupan: [120, 45, .18, 650], francepan: [220, 65, .12, 5200], croissant: [160, 60, .16, 2300],
   melonpan: [145, 55, .17, 1800], currypan: [180, 45, .18, 3400], creampan: [190, 75, .14, 850],
 };
@@ -53,13 +56,13 @@ export class BattleAudio {
     const audio = this.context;
     return this.loading ??= Promise.all(BREAD_IDS.map(async bread => { const sample = await loadHitSound(audio, bread); if (sample) this.samples.set(bread, sample); })).then(() => {});
   }
-  play = (kind: BattleSound, delay = 0, bread: BreadId = 'shokupan'): void => {
+  play = (kind: BattleSound, delay = 0, bread: FighterId = 'shokupan'): void => {
     const audio = this.context;
     if (!this.enabled() || this.unavailable || !audio || audio.state !== 'running') return;
     try {
       const when = audio.currentTime + delay;
       if (SPECIAL_SOUNDS.includes(kind)) { this.special(audio, kind as SpecialSound, when, bread); return; }
-      const impact = ['hit', 'clash', 'counter'].includes(kind), sample = impact ? this.samples.get(bread) : undefined;
+      const impact = ['hit', 'clash', 'counter'].includes(kind), sample = impact && bread !== 'ikkin' ? this.samples.get(bread) : undefined;
       if (sample) {
         const source = audio.createBufferSource(), gain = audio.createGain(); source.buffer = sample;
         source.connect(gain); gain.connect(audio.destination); gain.gain.setValueAtTime(.3, when);
@@ -115,13 +118,13 @@ export class BattleAudio {
     this.voices.add(source); source.onended = () => { source.disconnect(); filter.disconnect(); gain.disconnect(); this.voices.delete(source); };
     source.start(when); source.stop(when + duration);
   }
-  private special(audio: AudioContext, kind: SpecialSound, when: number, bread: BreadId): void {
+  private special(audio: AudioContext, kind: SpecialSound, when: number, bread: FighterId): void {
     if (kind === 'special') {
       const [path, duration, root] = specialRise[bread];
       this.sweep(audio, path, when, duration, .08, 'triangle'); this.burst(audio, when, duration, 900, 6000, .025, 'highpass');
       for (const ratio of [1, 1.26, 1.5, 2]) this.sweep(audio, [root * ratio], when + duration - .03, .24, .03, 'sine');
     } else if (kind === 'special-final') {
-      const [from, to, duration, noise] = specialLand[bread], sample = this.samples.get(bread);
+      const [from, to, duration, noise] = specialLand[bread], sample = bread === 'ikkin' ? undefined : this.samples.get(bread);
       this.sweep(audio, [from, to], when, duration, .11, 'triangle'); this.sweep(audio, [from / 2, 40], when, duration + .06, .09, 'sine');
       this.burst(audio, when, Math.min(.2, duration + .05), noise, noise * .5, .08, bread === 'francepan' ? 'highpass' : 'bandpass');
       if (sample) {
@@ -156,6 +159,19 @@ export class BattleAudio {
     group?.add(oscillator); oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); group?.delete(oscillator); };
     oscillator.start(when); oscillator.stop(when + duration + .02);
   }
+  // Boss entrance (plans/EXECPLAN-BOSS.md 4): crockery rattle, a falling whoosh, the landing thud, the eye glint, the motif.
+  boss = (cue: IntroCue): void => {
+    const audio = this.context;
+    if (!this.enabled() || this.unavailable || !audio || audio.state !== 'running') return;
+    try {
+      const when = audio.currentTime;
+      if (cue === 'rumble') { this.burst(audio, when, .12, 4200, 3000, .03, 'bandpass'); this.sweep(audio, [70, 55], when, .2, .05, 'sine'); }
+      else if (cue === 'whoosh') { this.burst(audio, when, .2, 300, 2400, .04, 'bandpass'); this.sweep(audio, [65, 50], when, .8, .06, 'triangle'); }
+      else if (cue === 'thud') { this.sweep(audio, [110, 55], when, .22, .14, 'triangle'); this.sweep(audio, [55, 32], when, .3, .12, 'sine'); this.burst(audio, when, .2, 900, 200, .09, 'lowpass'); }
+      else if (cue === 'glint') this.sweep(audio, [1568, 2093], when, .14, .035, 'sine');
+      else for (const [note, offset] of [[48, 0], [55, .16], [60, .32]] as const) this.tone(audio, audio.destination, frequencyOf(note), when + offset, .3, .1, 'triangle', this.cues);
+    } catch { this.failed(); }
+  };
   // Countdown, start and result jingles.
   cue = (kind: Cue): void => {
     const audio = this.context;

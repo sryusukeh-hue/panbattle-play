@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { BreadId } from './config';
+import type { FighterId } from './config';
 import { FACES, FACE_COLORS, GAZE_LIMIT, EYE_LIFT, DECAL_LIFT, DECAL_DENSITY, DECAL_MAX, LINE_BOOST, type FaceSpec } from './face-config';
 import { decalKey, type FaceFrame } from './face-state';
 
@@ -7,7 +7,7 @@ import { decalKey, type FaceFrame } from './face-state';
 // InstancedMesh) and a decal cut from the bread's own front triangles, all glued to the deformed surface each frame.
 export interface Anchor { a: number; b: number; c: number; u: number; v: number; w: number }
 export interface FaceTemplate {
-  bread: BreadId; eyes: [Anchor | null, Anchor | null];
+  bread: FighterId; eyes: [Anchor | null, Anchor | null];
   // Decal: source vertex per decal vertex, triangle list, planar UVs.
   decal: { source: Uint32Array; index: number[]; uv: Float32Array } | null;
 }
@@ -28,7 +28,7 @@ export function anchorAt(geometry: THREE.BufferGeometry, x: number, y: number): 
   }
   return best;
 }
-export function buildFaceTemplate(bread: BreadId, geometry: THREE.BufferGeometry): FaceTemplate {
+export function buildFaceTemplate(bread: FighterId, geometry: THREE.BufferGeometry): FaceTemplate {
   const spec = FACES[bread], pos = geometry.attributes.position!, normal = geometry.attributes.normal!, index = triangles(geometry);
   const eyes = spec.eyes.map(e => anchorAt(geometry, e.x, e.y)) as [Anchor | null, Anchor | null];
   const { x0, x1, y0, y1 } = spec.region, map = new Map<number, number>(), source: number[] = [], faces: number[] = [];
@@ -131,7 +131,7 @@ export class FaceRig {
 }
 
 // Draws brows, cheeks, mouth, sweat and stylised shut/happy eyes onto the decal canvas (face-local metres → pixels).
-export function paintFace(canvas: HTMLCanvasElement, bread: BreadId, face: FaceFrame): void {
+export function paintFace(canvas: HTMLCanvasElement, bread: FighterId, face: FaceFrame): void {
   const c = canvas.getContext('2d'); if (!c) return;
   const spec = FACES[bread], { x0, x1, y0, y1 } = spec.region, W = canvas.width, H = canvas.height;
   const X = (x: number): number => (x - x0) / (x1 - x0) * W, Y = (y: number): number => (1 - (y - y0) / (y1 - y0)) * H, S = Math.min(W / (x1 - x0), H / (y1 - y0));
@@ -148,7 +148,7 @@ export function paintFace(canvas: HTMLCanvasElement, bread: BreadId, face: FaceF
     if (face.brow === 'none') break;
     const side = i ? 1 : -1, bx = eye.x, by = eye.y + eye.radius[1] * 1.1 + .016, half = eye.radius[0] * .8;
     const tilt = face.brow === 'worry' ? .035 : face.brow === 'angry' ? -.03 : 0, arch = face.brow === 'up' ? .025 : .006;
-    line(bread === 'shokupan' ? .02 : .013);
+    line(bread === 'ikkin' ? .026 : bread === 'shokupan' ? .02 : .013);
     c.beginPath(); c.moveTo(X(bx - side * half), Y(by + tilt)); c.quadraticCurveTo(X(bx), Y(by + (tilt > 0 ? tilt * .6 : 0) + arch + (face.brow === 'up' ? .01 : 0)), X(bx + side * half), Y(by - (tilt > 0 ? 0 : tilt * .3))); c.stroke();
   }
   // Stylised eyes when the eyeballs are hidden.
@@ -172,7 +172,9 @@ export function paintFace(canvas: HTMLCanvasElement, bread: BreadId, face: FaceF
     c.fillStyle = '#ffffffcc'; c.beginPath(); c.arc(sx - r * .3, sy - r * .1, r * .25, 0, Math.PI * 2); c.fill();
   }
 }
-function paintMouth(c: CanvasRenderingContext2D, bread: BreadId, face: FaceFrame, spec: FaceSpec, X: (x: number) => number, Y: (y: number) => number, S: number): void {
+function paintMouth(c: CanvasRenderingContext2D, fighter: FighterId, face: FaceFrame, spec: FaceSpec, X: (x: number) => number, Y: (y: number) => number, S: number): void {
+  // The boss loaf is a toast at heart: it draws the slice's lips, at its own size.
+  const bread = fighter === 'ikkin' ? 'shokupan' : fighter;
   const m = spec.mouth, cx = X(m.x), cy = Y(m.y), w = m.w * S / 2, h = m.h * S / 2, droop = face.droop * .12 * h;
   const lip = (fill: string, stroke: string = '#6e3a34'): void => { c.fillStyle = fill; c.strokeStyle = stroke; c.lineWidth = .006 * S; c.fill(); c.stroke(); };
   const dark = (): void => lip('#4a1f1d', '#3a1714');

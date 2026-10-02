@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { BREADS, BREAD_IDS, clamp, type BreadId } from './config';
+import { BREADS, BOSS_ID, FIGHTER_IDS, LIMIT, clamp, type FighterId } from './config';
+import { BOSS_CAMERA, type IntroFrame } from './cinematic';
+import { buildLoaf, loafTexture, LOAF_BACK, LOAF_SIZE } from './loaf';
 import { phase, pose, type BattleView, type BattleEvent, type Fighter, type Side } from './battle';
 import { BattleFeedback, ReplayBuffer, damageStage, DAMAGE_DENT, deformVertex, VISUAL_LIMITS, type BattleSound } from './feedback';
 import { SPECIALS, motionTick, specialSweep } from '../shared/specials';
@@ -9,12 +11,14 @@ import { FaceRig, buildFaceTemplate, type FaceTemplate } from './face-rig';
 import { FaceState, copyFace, type FaceFrame, type FaceInput, type Reaction } from './face-state';
 
 interface Model { mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>; positions: Float32Array; normals: Float32Array; colors: Float32Array; face: FaceTemplate }
-interface Actor extends Model { stage: number; displayStage: number; dents: THREE.Vector3[]; wornPositions: Float32Array; wornNormals: Float32Array;
+interface Actor extends Model { stage: number; displayStage: number; displayHeat: number; dents: THREE.Vector3[]; wornPositions: Float32Array; wornNormals: Float32Array;
   // Face (plans/EXECPLAN-FACE.md): the glued eyes/lids/decal and the expression state.
   rig: FaceRig; expression: FaceState }
 interface ActorFrame { position: THREE.Vector3Tuple; rotation: THREE.Vector3Tuple; height: number; bend: number; direction: number[]; impact: number; hit: number; stage: number; positions: Float32Array; normals: Float32Array;
   // Special moves: root scale and a golden wind-up glow (replayed with the pose).
   scale: THREE.Vector3Tuple; glow: number; glowColor: string;
+  // Boss second form: how far the crust has darkened toward deep toast (0..1, max 15% of the way).
+  heat: number;
   // Resolved expression, copied so the replay shows the same face.
   face: FaceFrame }
 export type StanceCue = 'ready' | 'locked' | 'recovery' | 'counter' | 'charged';
@@ -24,26 +28,72 @@ type Mark = THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
 const sideSign = (side: Side): number => side === 'player' ? 1 : -1;
 const CAMERA_HOME = new THREE.Vector3(.9, 5.8, 7.1);
 // Face-centred stills: local y of the face and how much closer than the whole-bread framing.
-const FACE_FOCUS: Record<BreadId, number> = { shokupan: .02, francepan: .43, croissant: .18, melonpan: .03, currypan: .015, creampan: .02 };
-const THUMB_CLOSE: Record<BreadId, number> = { shokupan: 1.25, francepan: 1.8, croissant: 1.25, melonpan: 1.3, currypan: 1.25, creampan: 1.25 };
-const PORTRAIT_CLOSE: Record<BreadId, number> = { shokupan: 1.55, francepan: 2.3, croissant: 1.9, melonpan: 1.65, currypan: 1.7, creampan: 1.6 };
+const FACE_FOCUS: Record<FighterId, number> = { shokupan: .02, francepan: .43, croissant: .18, melonpan: .03, currypan: .015, creampan: .02, ikkin: .1 };
+const THUMB_CLOSE: Record<FighterId, number> = { shokupan: 1.25, francepan: 1.8, croissant: 1.25, melonpan: 1.3, currypan: 1.25, creampan: 1.25, ikkin: 1.2 };
+const PORTRAIT_CLOSE: Record<FighterId, number> = { shokupan: 1.55, francepan: 2.3, croissant: 1.9, melonpan: 1.65, currypan: 1.7, creampan: 1.6, ikkin: 1.5 };
 // Crumbs take the hit bread's own look: shape (box proportions, or a tetrahedron) and colour.
-const CRUMB: Record<BreadId, { color: string; box?: readonly [number, number, number] }> = {
+const CRUMB: Record<FighterId, { color: string; box?: readonly [number, number, number] }> = {
   shokupan: { color: '#fff5dc', box: [1, 1, .7] }, francepan: { color: '#995020' }, croissant: { color: '#df9e48', box: [1.6, .2, .8] },
   melonpan: { color: '#e4bc65', box: [1.1, .7, 1.1] }, currypan: { color: '#b8752d' }, creampan: { color: '#f5ddb1', box: [1.25, .8, 1] },
+  ikkin: { color: '#ffe8bb', box: [1.3, 1.3, .8] },
 };
 // Crumbs thrown by a landed special stage: [early stages, final stage].
-const BURST: Record<BreadId, readonly [number, number]> = { shokupan: [24, 24], francepan: [18, 18], croissant: [4, 12], melonpan: [18, 18], currypan: [6, 16], creampan: [18, 18] };
-type Marks = Record<BreadId, Mark[]>;
+const BURST: Record<FighterId, readonly [number, number]> = { shokupan: [24, 24], francepan: [18, 18], croissant: [4, 12], melonpan: [18, 18], currypan: [6, 16], creampan: [18, 18], ikkin: [28, 28] };
+type Marks = Record<FighterId, Mark[]>;
 export type Mood = 'calm' | 'ouch' | 'dodge' | 'special';
 const MOODS: readonly Mood[] = ['calm', 'ouch', 'dodge', 'special'];
 const REST: FaceInput = { phase: 'ready', special: false, charging: false, stage: 0, ending: null, look: [.25, .1] };
 // Half-width of the lane a special move sweeps at the defender's line, from the move's attack ellipse (see specialTouching).
-export function dangerHalfWidth(attacker: BreadId, defender: BreadId): number {
+export function dangerHalfWidth(attacker: FighterId, defender: FighterId): number {
   const spec = SPECIALS[attacker], travel = Math.max(...spec.keys.map(k => k.at[2])), gap = Math.abs(2.4 - travel);
   const reach = spec.rz + BREADS[defender].depth, t = Math.min(1, gap / reach);
   return (spec.rx + BREADS[defender].width) * Math.sqrt(1 - t * t) + specialSweep(attacker);
 }
+// Widest lateral reach of a normal swing at the defender's line, measured from the locked aim (static defender), for an
+// attacker standing `offset` metres from that aim: the swing glides toward the aim as it extends (see shared pose()).
+export function normalDangerHalfWidth(attacker: FighterId, defender: FighterId, offset = 0): number {
+  const a = BREADS[attacker], d = BREADS[defender];
+  let widest = 0;
+  for (let i = 0; i <= 100; i++) {
+    const p = i / 100, lean = a.lean * p, rz = Math.hypot(a.height * Math.sin(lean), a.depth * Math.cos(lean)), t = (2.4 - a.reach * p) / (rz + d.depth);
+    if (Math.abs(t) < 1) widest = Math.max(widest, (a.width + d.width) * Math.sqrt(1 - t * t) + (1 - p) * Math.abs(offset));
+  }
+  return widest;
+}
+// A flat rounded-rectangle outline, 2 × 2 units (scale x/z to the half extents), lying on the cloth.
+function roundedFrame(): THREE.BufferGeometry {
+  const rect = (half: number, r: number): THREE.Path => {
+    const p = new THREE.Path(); p.moveTo(-half + r, -half); p.lineTo(half - r, -half); p.quadraticCurveTo(half, -half, half, -half + r);
+    p.lineTo(half, half - r); p.quadraticCurveTo(half, half, half - r, half); p.lineTo(-half + r, half); p.quadraticCurveTo(-half, half, -half, half - r);
+    p.lineTo(-half, -half + r); p.quadraticCurveTo(-half, -half, -half + r, -half); return p;
+  };
+  const shape = new THREE.Shape(rect(1, .3).getPoints(6)); shape.holes.push(rect(.9, .24));
+  return new THREE.ShapeGeometry(shape, 6).rotateX(-Math.PI / 2);
+}
+// The boss's little gold crown (about 200 triangles): a band and five points with round tips.
+function crownModel(): THREE.Group {
+  const gold = new THREE.MeshStandardMaterial({ color: '#f2c14e', roughness: .3, metalness: .65, emissive: '#5a3a00', emissiveIntensity: .25 });
+  const group = new THREE.Group(), band = new THREE.Mesh(new THREE.CylinderGeometry(.2, .22, .1, 20, 1, true), gold);
+  band.material.side = THREE.DoubleSide; group.add(band);
+  for (let i = 0; i < 5; i++) {
+    const a = i / 5 * Math.PI * 2, spike = new THREE.Mesh(new THREE.ConeGeometry(.055, .14, 6), gold);
+    spike.position.set(Math.sin(a) * .2, .11, Math.cos(a) * .2); group.add(spike);
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(.028, 8, 6), new THREE.MeshStandardMaterial({ color: i % 2 ? '#e2584a' : '#fff4d0', roughness: .25 }));
+    ball.position.set(Math.sin(a) * .2, .19, Math.cos(a) * .2); group.add(ball);
+  }
+  group.traverse(o => { if (o instanceof THREE.Mesh) o.castShadow = true; });
+  group.name = 'crown'; return group;
+}
+let steamMap: THREE.CanvasTexture | undefined;
+function steamTexture(): THREE.CanvasTexture | null {
+  if (typeof document === 'undefined') return null;
+  if (steamMap) return steamMap;
+  const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64;
+  const c = canvas.getContext('2d')!, g = c.createRadialGradient(32, 32, 2, 32, 32, 30);
+  g.addColorStop(0, 'rgba(255,255,255,.9)'); g.addColorStop(1, 'rgba(255,255,255,0)'); c.fillStyle = g; c.fillRect(0, 0, 64, 64);
+  return steamMap = new THREE.CanvasTexture(canvas);
+}
+const TOAST = new THREE.Color('#5c2a0e');
 export function damageGeometry(geometry: THREE.BufferGeometry, positions: Float32Array, normals: Float32Array, colors: Float32Array, stage: number, dents: readonly THREE.Vector3[]): void {
   const pos = geometry.attributes.position!, color = geometry.attributes.color!;
   for (let i = 0; i < pos.count; i++) {
@@ -61,7 +111,7 @@ export function damageGeometry(geometry: THREE.BufferGeometry, positions: Float3
 export class TableRenderer {
   private renderer: THREE.WebGLRenderer; private scene = new THREE.Scene();
   private camera = new THREE.PerspectiveCamera(46, 1, .1, 60);
-  private templates = new Map<BreadId, Model>();
+  private templates = new Map<FighterId, Model>();
   private actors: Partial<Record<Side, Actor>> = {}; private ids = '';
   private crumbs: Crumb[] = []; private marker: THREE.Mesh; private shadows: THREE.Mesh[] = [];
   private frames: number[] = []; private latencies: number[] = []; private resize: ResizeObserver;
@@ -76,7 +126,8 @@ export class TableRenderer {
   private reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   private motionChanged = (): void => { this.clearEffects(); };
   // Winner/loser reaction after a decisive match; presentation only.
-  private ending: { winner: Side | 'draw'; start: number } | null = null;
+  // Its clock only runs while main ticks it (tickEnding), so a paused result or champion ending holds its pose.
+  private ending: { winner: Side | 'draw'; tilt: boolean; tiltFrom: number } | null = null; private endingClock = 0;
   private envMap: THREE.Texture; private shadowFrame = 0;
   // Player-state ring under the player's bread: ready / locked / recovering / counter chance.
   private stance: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
@@ -87,9 +138,14 @@ export class TableRenderer {
   // Special stages whose strike visual was shown, per side (attack id + stage mask): each plays once, hit or miss,
   // even when a slow frame skips a whole stage window, and a pause never replays it.
   private flashed: Partial<Record<Side, { id: number; mask: number }>> = {};
-  private portraits: Partial<Record<BreadId, Record<Mood, string>>> = {}; private mood: Mood = 'calm';
+  private portraits: Partial<Record<FighterId, Record<Mood, string>>> = {}; private mood: Mood = 'calm';
+  // Camera home for this match (the boss fight pulls back a little) and its look-at point.
+  private home = CAMERA_HOME.clone(); private look = new THREE.Vector3(0, 1.05, -.15);
+  // Boss extras (plans/EXECPLAN-BOSS.md): crown, the lane under its normal swing, second-form steam, the entrance.
+  private crown: THREE.Group; private crownDrop = -1; private crownFrom: THREE.Vector3 | null = null; private bossLane: [Mark, Mark]; private steam: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[] = [];
+  private heat = 0; private intro: IntroFrame | null = null; private plates: { mesh: THREE.Object3D; y: number }[] = []; private loafShadow: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
   constructor(private canvas: HTMLCanvasElement, fail: (message: string) => void,
-    private playSound: (sound: BattleSound, delay?: number, bread?: BreadId) => void = () => {}, private stopSound: () => void = () => {}) {
+    private playSound: (sound: BattleSound, delay?: number, bread?: FighterId) => void = () => {}, private stopSound: () => void = () => {}) {
     this.reducedMotion.addEventListener('change', this.motionChanged);
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
@@ -116,6 +172,18 @@ export class TableRenderer {
     this.stance = new THREE.Mesh(new THREE.RingGeometry(.44, .52, 48), new THREE.MeshBasicMaterial({ color: '#6f9a64', transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide }));
     this.stance.rotation.x = -Math.PI / 2; this.stance.position.y = .016; this.stance.visible = false; this.stance.userData.added = true; this.scene.add(this.stance);
     this.marks = { player: this.markSet(), cpu: this.markSet() };
+    const lane = (geometry: THREE.BufferGeometry): Mark => {
+      const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide }));
+      mesh.visible = false; mesh.renderOrder = 2; mesh.userData.added = true; this.scene.add(mesh); return mesh;
+    };
+    this.bossLane = [lane(roundedFrame()), lane(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2))];
+    this.crown = crownModel();
+    for (let i = 0; i < 6; i++) {
+      const puff = new THREE.Mesh(new THREE.PlaneGeometry(.22, .22), new THREE.MeshBasicMaterial({ map: steamTexture(), transparent: true, opacity: 0, depthWrite: false }));
+      puff.visible = false; puff.userData.added = true; this.scene.add(puff); this.steam.push(puff);
+    }
+    this.loafShadow = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 1.3).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: '#4a3424', transparent: true, opacity: 0, depthWrite: false }));
+    this.loafShadow.position.set(0, .021, -1.2); this.loafShadow.visible = false; this.loafShadow.userData.added = true; this.scene.add(this.loafShadow);
     this.resize = new ResizeObserver(() => this.fit()); this.resize.observe(canvas); this.fit();
     canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); this.lost = true; fail('3D描画が中断しました。再読み込みして再開してください。'); });
     canvas.addEventListener('webglcontextrestored', () => { fail('3D描画が復帰しました。再読み込みしてパンを読み直してください。'); });
@@ -135,9 +203,12 @@ export class TableRenderer {
     const ring = (): THREE.BufferGeometry => new THREE.RingGeometry(.9, 1, 40).rotateX(-Math.PI / 2);
     const disc = (): THREE.BufferGeometry => new THREE.CircleGeometry(1, 32).rotateX(-Math.PI / 2);
     const bar = (): THREE.BufferGeometry => new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+    const roundFrame = (): THREE.BufferGeometry => roundedFrame();
     return { shokupan: [mark(square), mark(fill)], francepan: [mark(lane), mark(lane.clone()), mark(tip)], croissant: [mark(crescent()), mark(crescent()), mark(crescent())],
       melonpan: [mark(ring()), mark(disc()), mark(bar()), mark(bar())], currypan: [mark(ring()), mark(disc()), mark(disc()), mark(disc())],
-      creampan: [mark(ring()), mark(disc()), mark(tip.clone())] };
+      creampan: [mark(ring()), mark(disc()), mark(tip.clone())],
+      // Boss press: white rounded frame over the final lane, a fill rising toward the player, arrows to the safe side(s).
+      ikkin: [mark(roundFrame()), mark(fill.clone()), mark(tip.clone()), mark(tip.clone())] };
   }
   private table(): void {
     const textureCanvas = document.createElement('canvas'); textureCanvas.width = 256; textureCanvas.height = 256;
@@ -155,6 +226,7 @@ export class TableRenderer {
     for (const [x, z, r] of [[-2.05, -2.2, .82], [2.8, 1.3, .9]]) {
       const plate = new THREE.Mesh(new THREE.CylinderGeometry(r!, r! * .83, .09, 48), plateMat); plate.position.set(x!, .065, z!); this.scene.add(plate);
       const rim = new THREE.Mesh(new THREE.TorusGeometry(r! * .88, .04, 8, 48), plateMat); rim.rotation.x = Math.PI / 2; rim.position.set(x!, .13, z!); this.scene.add(rim);
+      this.plates.push({ mesh: plate, y: plate.position.y }, { mesh: rim, y: rim.position.y });
     }
     const mugMat = new THREE.MeshStandardMaterial({ color: '#7f9c89', roughness: .45, side: THREE.DoubleSide });
     const cup = new THREE.Mesh(new THREE.CylinderGeometry(.43, .34, .7, 40, 1, true), mugMat); cup.position.set(1.7, .36, -3.4); this.scene.add(cup);
@@ -214,16 +286,23 @@ export class TableRenderer {
   }
   async load(): Promise<void> {
     const loader = new GLTFLoader();
-    await Promise.all(BREAD_IDS.map(async id => {
-      const model = await loader.loadAsync(`${import.meta.env.BASE_URL}assets/models/${id}.glb`);
-      model.scene.updateMatrixWorld(true);
-      let found: THREE.Mesh | undefined;
-      model.scene.traverse(o => { if (o instanceof THREE.Mesh) found = o; });
-      if (!found) throw new Error(`${id}: mesh missing`);
-      const geometry = found.geometry.clone().applyMatrix4(found.matrixWorld);
+    await Promise.all(FIGHTER_IDS.map(async id => {
+      let geometry: THREE.BufferGeometry, source: THREE.MeshStandardMaterial;
+      if (id === BOSS_ID) {
+        // The boss loaf is generated, not downloaded (src/mvp/loaf.ts); sized so ×0.92 lands on its game size.
+        geometry = buildLoaf(LOAF_SIZE); source = new THREE.MeshStandardMaterial({ map: loafTexture(), roughness: .72, metalness: 0 });
+      } else {
+        const model = await loader.loadAsync(`${import.meta.env.BASE_URL}assets/models/${id}.glb`);
+        model.scene.updateMatrixWorld(true);
+        let found: THREE.Mesh | undefined;
+        model.scene.traverse(o => { if (o instanceof THREE.Mesh) found = o; });
+        if (!found) throw new Error(`${id}: mesh missing`);
+        geometry = found.geometry.clone().applyMatrix4(found.matrixWorld); source = found.material as THREE.MeshStandardMaterial;
+      }
       geometry.scale(.92, .92, .92); geometry.computeBoundingBox();
       const bounds = geometry.boundingBox!, center = bounds.getCenter(new THREE.Vector3()); geometry.translate(-center.x, -center.y, -center.z);
-      const material = (found.material as THREE.MeshStandardMaterial).clone(); material.envMap = this.envMap; material.envMapIntensity = .4; material.vertexColors = true;
+      if (id === BOSS_ID) geometry.translate(0, 0, LOAF_BACK);
+      const material = source.clone(); material.envMap = this.envMap; material.envMapIntensity = .4; material.vertexColors = true;
       const colors = new Float32Array(geometry.attributes.position!.count * 3), original = geometry.attributes.color;
       for (let i = 0; i < colors.length / 3; i++) { colors[i * 3] = original?.getX(i) ?? 1; colors[i * 3 + 1] = original?.getY(i) ?? 1; colors[i * 3 + 2] = original?.getZ(i) ?? 1; }
       geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
@@ -237,7 +316,7 @@ export class TableRenderer {
     this.renderer.setSize(width, height, false); this.camera.aspect = width / height;
     // Preserve horizontal room for the widest bread at both dodge limits in portrait.
     this.camera.fov = clamp(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(17.5)) / this.camera.aspect) * 180 / Math.PI, 44, 78);
-    this.camera.position.set(.9, 5.8, 7.1); this.camera.lookAt(0, 1.05, -.15); this.camera.updateProjectionMatrix();
+    this.camera.position.copy(this.home); this.camera.lookAt(this.look); this.camera.updateProjectionMatrix();
   }
   private choose(battle: BattleView): void {
     const ids = `${battle.player.bread}/${battle.cpu.bread}`;
@@ -249,33 +328,40 @@ export class TableRenderer {
       if (!t) throw new Error('モデルの読み込みが完了していません。');
       const mesh = new THREE.Mesh(t.mesh.geometry.clone(), t.mesh.material.clone()); mesh.castShadow = true;
       const rig = new FaceRig(t.face); mesh.add(rig.group);
-      this.actors[side] = { mesh, positions: t.positions, normals: t.normals, colors: t.colors, face: t.face, stage: 0, displayStage: 0, dents: [], wornPositions: t.positions, wornNormals: t.normals,
+      this.actors[side] = { mesh, positions: t.positions, normals: t.normals, colors: t.colors, face: t.face, stage: 0, displayStage: 0, displayHeat: 0, dents: [], wornPositions: t.positions, wornNormals: t.normals,
         rig, expression: new FaceState(battle[side].bread, side === 'player' ? 11 : 29) }; this.scene.add(mesh);
     }
     this.ids = ids;
+    const boss = battle.cpu.bread === BOSS_ID;
+    this.home.set(...(boss ? BOSS_CAMERA.position : CAMERA_HOME.toArray())); this.look.set(...(boss ? BOSS_CAMERA.target : [0, 1.05, -.15] as const));
+    this.seatCrown(); this.fit();
   }
   private actor(f: Fighter, side: Side, time: number, dt: number, other: Fighter): ActorFrame {
     // The result screen shows the breads at rest, not frozen mid-move.
     if (this.ending && (f.attack || f.recoil > 0 || f.hit > 0)) f = { ...f, attack: null, recoil: 0, hit: 0 };
-    const m = this.actors[side]!, p = pose(f, side), b = BREADS[f.bread], sp = p.special, calm = this.reducedMotion.matches;
+    const m = this.actors[side]!, p = pose(f, side), b = BREADS[f.bread], sp = p.special, calm = this.reducedMotion.matches, intro = side === 'cpu' ? this.intro : null;
     // Special moves drive the whole root; reduced motion keeps the XZ path and hit timing but drops the jump, growth and spin.
     const lift = sp ? calm ? 0 : p.y - 1.43 : Math.sin(time * 2.2 + (side === 'cpu' ? 1 : 0)) * .025;
-    m.mesh.position.set(p.x, 1.43 + lift, p.z);
+    m.mesh.position.set(p.x, intro ? intro.bossY : 1.43 + lift, p.z);
     m.mesh.rotation.set(p.lean + Math.sin(f.hit * 75) * f.hit * .12, (side === 'player' ? Math.PI + .12 : -.08) + (sp ? sideSign(side) * sp.yaw : 0),
       Math.sin(f.hit * 55) * f.hit * .1 + (sp && !calm ? sideSign(side) * sp.roll : 0));
     if (side === 'cpu' && phase(f) === 'windup' && !f.attack!.special && !calm) m.mesh.rotation.x -= .06 * Math.sin(Math.PI * f.attack!.age / f.attack!.windup);
-    const scale: THREE.Vector3Tuple = sp && !calm ? [sp.scale[0], sp.scale[1], sp.scale[2]] : [1, 1, 1];
+    const scale: THREE.Vector3Tuple = intro ? [intro.squash[0], intro.squash[1], intro.squash[2]] : sp && !calm ? [sp.scale[0], sp.scale[1], sp.scale[2]] : [1, 1, 1];
     // Golden glow builds through the wind-up, flashes on the strike and fades out in recovery.
     const spec = SPECIALS[f.bread], a = f.attack, charge = side === 'cpu' && this.charging && !this.ending;
     const glow = charge ? .45 + (calm ? 0 : .3 * Math.sin(time * 18)) : !a?.special ? 0 : phase(f) === 'windup' ? .35 + .45 * clamp(a.age / a.windup, 0, 1) + (calm ? 0 : .12 * Math.sin(time * 40))
       : phase(f) === 'active' ? 1 : Math.max(0, .6 * (1 - (a.age - a.windup - spec.active) / a.recovery * 2.5));
     if (this.ending) {
-      const t = (performance.now() - this.ending.start) / 1000, calm = this.reducedMotion.matches;
+      const t = this.endingClock, calm = this.reducedMotion.matches;
       // Every bread ends facing the camera, so the player finally sees their own bread's face.
       const base = m.mesh.rotation.y, target = Math.atan2(CAMERA_HOME.x - p.x, CAMERA_HOME.z - p.z), turn = Math.atan2(Math.sin(target - base), Math.cos(target - base));
       if (this.ending.winner === side) {
         m.mesh.position.y += calm ? .12 : Math.abs(Math.sin(t * 6.5)) * .32 * (t < 1.6 ? 1 : .45);
         m.mesh.rotation.y = base + (calm ? turn : (turn + Math.PI * 2) * (1 - (1 - Math.min(1, t)) ** 3));
+      } else if (this.ending.winner !== 'draw' && f.bread === BOSS_ID) {
+        // The defeated boss slumps, then bows to the champion with a smile (plans/EXECPLAN-BOSS.md 4).
+        const slump = calm ? 1 : clamp(t / .6, 0, 1), bow = calm ? .35 : t < .6 ? 0 : t < 1 ? (t - .6) / .4 : t < 1.5 ? 1 : Math.max(.35, 1 - (t - 1.5) / .5 * .65);
+        m.mesh.rotation.y = base + turn * (calm ? 1 : Math.min(1, t / .6)); m.mesh.position.y -= .2 * slump; m.mesh.rotation.x += .5 * bow;
       } else if (this.ending.winner !== 'draw') {
         const fall = calm ? 1 : clamp((t - .25) / .5, 0, 1), sway = calm ? 0 : Math.sin(t * 3) * .04 * fall;
         m.mesh.rotation.y = base + turn * (calm ? 1 : Math.min(1, t / .35));
@@ -297,7 +383,10 @@ export class TableRenderer {
     const bend = Math.sin(Math.max(0, p.progress) * Math.PI) * .03 + Math.sin(f.hit * 60) * f.hit * .025;
     const frame: ActorFrame = { position: m.mesh.position.toArray(), rotation: [m.mesh.rotation.x, m.mesh.rotation.y, m.mesh.rotation.z], height: b.height,
       bend, direction, impact, hit: f.hit, stage, positions: m.wornPositions, normals: m.wornNormals, scale, glow, glowColor: charge ? '#ff5a36' : spec.color,
-      face: copyFace(m.expression.update(dt, this.faceInput(f, side, other, charge, stage), calm)) };
+      heat: side === 'cpu' ? this.heat : 0, face: copyFace(m.expression.update(dt, this.faceInput(f, side, other, charge, stage), calm)) };
+    // Asleep until its eyes open in the entrance.
+    if (intro) frame.face.open = [frame.face.open[0] * intro.eyes, frame.face.open[1] * intro.eyes];
+    m.mesh.visible = !this.intro || (side === 'cpu' ? this.intro.bossVisible : this.intro.challengerVisible);
     this.drawActor(side, frame); return frame;
   }
   // What the face reacts to: action phase, fatigue, result, and where to look (the opponent, or the camera on the result screen).
@@ -306,16 +395,18 @@ export class TableRenderer {
     if (this.ending) look.copy(CAMERA_HOME); else look.set(o.x, o.y, o.z);
     look.sub(m.mesh.position).applyQuaternion(m.mesh.quaternion.clone().invert()).normalize();
     const ending = !this.ending ? null : this.ending.winner === 'draw' ? 'draw' : this.ending.winner === side ? 'win' : 'lose';
-    return { phase: this.ending ? 'ready' : phase(f), special: !!f.attack?.special, charging, stage, ending, look: [look.x * 2.2, look.y * 2.2] };
+    return { phase: this.ending ? 'ready' : phase(f), special: !!f.attack?.special, charging, stage, ending, look: [look.x * 2.2, look.y * 2.2], heated: side === 'cpu' && this.heat > .5 };
   }
   private drawActor(side: Side, frame: ActorFrame): void {
     const m = this.actors[side]!, { bend, direction, impact, height } = frame;
     m.mesh.position.fromArray(frame.position); m.mesh.rotation.set(...frame.rotation); m.mesh.scale.set(...frame.scale);
     const pos = m.mesh.geometry.attributes.position!, normal = m.mesh.geometry.attributes.normal!;
-    if (m.displayStage !== frame.stage) {
-      const color = m.mesh.geometry.attributes.color!;
-      for (let i = 0; i < color.count; i++) color.setXYZ(i, m.colors[i * 3]! * .94 ** frame.stage, m.colors[i * 3 + 1]! * .87 ** frame.stage, m.colors[i * 3 + 2]! * .79 ** frame.stage);
-      color.needsUpdate = true; m.displayStage = frame.stage;
+    // Colours are always rebuilt from the originals (never compounded): damage darkening, then the boss's toasting.
+    const heat = Math.round(frame.heat * 20) / 20;
+    if (m.displayStage !== frame.stage || m.displayHeat !== heat) {
+      const color = m.mesh.geometry.attributes.color!, k = .15 * heat;
+      for (let i = 0; i < color.count; i++) color.setXYZ(i, (m.colors[i * 3]! * (1 - k) + TOAST.r * k) * .94 ** frame.stage, (m.colors[i * 3 + 1]! * (1 - k) + TOAST.g * k) * .87 ** frame.stage, (m.colors[i * 3 + 2]! * (1 - k) + TOAST.b * k) * .79 ** frame.stage);
+      color.needsUpdate = true; m.displayStage = frame.stage; m.displayHeat = heat;
     }
     const deformed: [number, number, number] = [0, 0, 0];
     for (let i = 0; i < pos.count; i++) {
@@ -368,7 +459,7 @@ export class TableRenderer {
     else if (event.kind === 'dodge' || event.kind === 'counter') react(event.side, event.kind);
   }
   // One crumb of the given bread's material; `power` scales the burst for special moves.
-  private crumb(bread: BreadId, x: number, y: number, z: number, i: number, power = 1): void {
+  private crumb(bread: FighterId, x: number, y: number, z: number, i: number, power = 1): void {
     const size = (.03 + i % 3 * .012) * (power > 1 ? 1.25 : 1), look = CRUMB[bread];
     // The croissant's flakes stay paper-thin whatever their size.
     const geometry = !look.box ? new THREE.TetrahedronGeometry(size) : new THREE.BoxGeometry(size * look.box[0], bread === 'croissant' ? .007 : size * look.box[1], size * look.box[2]);
@@ -441,8 +532,13 @@ export class TableRenderer {
     // The cut-in leans the camera in slightly; combined with hit zoom it never exceeds the shared zoom limit.
     const zoom = this.reducedMotion.matches ? 0 : Math.min(VISUAL_LIMITS.zoom, VISUAL_LIMITS.zoom * Math.sin(Math.PI * this.zoom / .24) + VISUAL_LIMITS.zoom * .8 * this.focus);
     // Result screen: tilt down so the celebrating breads sit above the result sheet.
-    const tilt = !this.ending ? 0 : this.reducedMotion.matches ? 1 : 1 - (1 - Math.min(1, (performance.now() - this.ending.start) / 900)) ** 3;
-    this.camera.position.set(.9 + shake, 5.8, 7.1 - zoom); this.camera.lookAt(0, 1.05 - 5.1 * tilt, -.15);
+    const tilt = !this.ending?.tilt ? 0 : this.reducedMotion.matches ? 1 : 1 - (1 - Math.min(1, (this.endingClock - this.ending.tiltFrom) / .9)) ** 3;
+    if (this.intro) {
+      // The entrance owns the camera; the landing jolts it (never under reduced motion, which uses the still version).
+      const [x, y, z] = this.intro.camera.position, [tx, ty, tz] = this.intro.camera.target, jolt = this.reducedMotion.matches ? 0 : .05 * this.intro.jolt * Math.sin(this.intro.jolt * 60);
+      this.camera.position.set(x + jolt, y + jolt * .5, z); this.camera.lookAt(tx, ty, tz); return;
+    }
+    this.camera.position.set(this.home.x + shake, this.home.y, this.home.z - zoom); this.camera.lookAt(this.look.x, this.look.y - 5.1 * tilt, this.look.z);
   }
   private trail(f: Fighter, side: Side): void {
     const p = pose(f, side), old = this.previous[side], attack = f.attack;
@@ -463,11 +559,12 @@ export class TableRenderer {
     }
     this.crumbs = []; this.accents = []; this.previous = {}; this.impacts = {}; this.shake = this.zoom = this.focus = 0; this.cameraEffect(0); this.marker.visible = false;
     for (const set of Object.values(this.marks ?? {})) for (const mark of Object.values(set).flat()) mark.visible = false;
+    for (const mesh of [...(this.bossLane ?? []), ...(this.steam ?? [])]) mesh.visible = false;
   }
   resetEffects(newMatch = false): void {
     this.clearEffects(); this.feedback.reset(newMatch); this.stopSound();
     if (newMatch) {
-      this.contacts = {}; this.flashed = {}; this.replay.reset();
+      this.contacts = {}; this.flashed = {}; this.replay.reset(); this.seatCrown();
       for (const m of Object.values(this.actors)) { damageGeometry(m.mesh.geometry, m.positions, m.normals, m.colors, 0, []); m.stage = m.displayStage = 0; m.dents = []; m.wornPositions = m.positions; m.wornNormals = m.normals; m.expression.reset(); }
     }
   }
@@ -481,13 +578,17 @@ export class TableRenderer {
   // timeScale slows effect animation only (finish slow-motion); frame metrics keep the real dt.
   // local.frozen: the special cut-in is playing; nothing is recorded for the replay and effects drift in slow motion.
   // local.charging: the CPU's once-per-match meter charge is running (it glows).
-  render(battle: BattleView, time: number, frameDt: number, active: boolean, local?: { remaining?: number; cue?: StanceCue; frozen?: boolean; charging?: boolean }, timeScale = 1): void {
+  // local.heat: the boss's second-form toasting (0..1); local.intro: the boss entrance frame (owns camera and boss pose).
+  render(battle: BattleView, time: number, frameDt: number, active: boolean, local?: { remaining?: number; cue?: StanceCue; frozen?: boolean; charging?: boolean; heat?: number; intro?: IntroFrame | null }, timeScale = 1): void {
     if (this.lost) return;
     const dt = frameDt * timeScale * (local?.frozen ? .15 : 1);
+    // The toasting persists across screens that pass no heat (finish, champion); a new match resets it.
+    if (local?.heat !== undefined) this.heat = local.heat;
+    this.intro = local?.intro ?? null;
     this.focus = clamp(this.focus + (local?.frozen ? 1 : -1) * frameDt * 6, 0, 1); this.charging = !!local?.charging;
     const feedback = this.feedback.update(battle, active, local?.remaining);
-    if (!active) this.resetEffects();
-    else {
+    if (!active && !this.intro) this.resetEffects();
+    else if (active) {
       for (const event of feedback.events) this.accent(event, battle);
       const soundEvent = feedback.events.find(event => event.kind === feedback.sound);
       if (feedback.sound) this.playSound(feedback.sound, 0, battle[feedback.soundSide ?? soundEvent?.side ?? 'player'].bread);
@@ -504,7 +605,10 @@ export class TableRenderer {
     for (const impact of Object.values(this.impacts)) impact.life = Math.max(0, impact.life - dt);
     this.updateStance(battle, active ? local?.cue : undefined, time);
     const a = battle.cpu.attack;
-    this.marker.visible = active && phase(battle.cpu) === 'windup' && !a?.special;
+    // The boss lane stays until its hit window closes, so its disappearing means "safe — strike back now".
+    const bossSwing = battle.cpu.bread === BOSS_ID && active && (phase(battle.cpu) === 'windup' || phase(battle.cpu) === 'active') && !!a && !a.special && !this.ending;
+    this.marker.visible = active && phase(battle.cpu) === 'windup' && !a?.special && !bossSwing;
+    this.updateBoss(battle, bossSwing, time);
     for (const side of ['player', 'cpu'] as const) {
       this.updateMarks(battle, side, active, time);
       const f = battle[side], attack = f.attack;
@@ -572,6 +676,18 @@ export class TableRenderer {
           mesh.position.set(aim, .024 + i * .002, target + sign * (i * .22 - .1)); mesh.scale.set(half, 1, half * .8);
           mesh.rotation.y = side === 'player' ? 0 : Math.PI;
         });
+      } else if (f.bread === 'ikkin') {
+        // Deep-red frame over the final lane (it reads on the pale cloth), an orange fill rising toward the defender,
+        // arrows toward the open side(s).
+        const [frame, fill, left, right] = meshes as [Mark, Mark, Mark, Mark], deep = spec.rz + .16;
+        frame.position.set(aim, .026, target); frame.scale.set(half, 1, deep); frame.material.color.set('#b8240f'); frame.material.opacity = Math.min(1, .7 + .3 * progress);
+        fill.position.set(aim, .022, target + sign * deep * (1 - progress)); fill.scale.set(half * 2, 1, Math.max(.01, deep * 2 * progress)); fill.material.color.set('#ff7a2a'); fill.material.opacity = .25 + .4 * progress;
+        const room = [aim - half + LIMIT, LIMIT - aim - half], both = Math.abs(aim) < .2;
+        [left, right].forEach((arrow, i) => {
+          arrow.visible = live && (both || (i === 0 ? room[0]! >= room[1]! : room[1]! > room[0]!));
+          arrow.position.set(aim + (i ? 1 : -1) * (half + .32), .028, target); arrow.scale.setScalar(.62); arrow.rotation.y = i ? -Math.PI / 2 : Math.PI / 2;
+          arrow.material.color.set('#e8501f'); arrow.material.opacity = .85;
+        });
       } else {
         // Closed ellipse over the whole danger area, kept until the last hit window closes.
         const [outline, fill, ...extras] = meshes as [Mark, Mark, ...Mark[]], deep = spec.rz + .16;
@@ -600,6 +716,60 @@ export class TableRenderer {
       }
     }
   }
+  // Boss-only scenery: the lane under its normal swing, second-form steam, the entrance shadow and plates, the crown.
+  private updateBoss(battle: BattleView, swing: boolean, time: number): void {
+    const boss = battle.cpu.bread === BOSS_ID, calm = this.reducedMotion.matches, [frame, fill] = this.bossLane;
+    frame.visible = fill.visible = swing;
+    if (swing) {
+      const a = battle.cpu.attack!, progress = Math.min(1, a.age / a.windup), half = normalDangerHalfWidth('ikkin', battle.player.bread, battle.cpu.x - a.aim), deep = .5;
+      frame.position.set(a.aim, .025, 1.2); frame.scale.set(half, 1, deep); frame.material.color.set(progress > .7 ? '#a81d0c' : '#c8321c'); frame.material.opacity = .6 + .4 * progress;
+      fill.position.set(a.aim, .021, 1.2); fill.scale.set(half * 2 * (calm ? 1 : .55 + .45 * progress), 1, deep * 2); fill.material.color.set(progress > .7 ? '#e0401c' : '#ff7a3a'); fill.material.opacity = .2 + .3 * progress;
+    }
+    const cpu = this.actors.cpu, steaming = boss && this.heat > 0 && !!cpu?.mesh.visible && !this.ending;
+    this.steam.forEach((puff, i) => {
+      puff.visible = steaming && !calm;
+      if (!puff.visible) return;
+      const cycle = (time * .55 + i / this.steam.length) % 1, p = cpu!.mesh.position;
+      puff.position.set(p.x + Math.sin(i * 2.1 + time) * .35, p.y + .85 + cycle * .9, p.z + Math.cos(i * 1.7) * .3);
+      puff.scale.setScalar(.8 + cycle * 1.4); puff.material.opacity = this.heat * .5 * Math.sin(cycle * Math.PI); puff.quaternion.copy(this.camera.quaternion);
+    });
+    const intro = this.intro;
+    this.loafShadow.visible = !!intro && intro.shadow > 0 && intro.bossY > 1.5;
+    if (intro) { this.loafShadow.scale.setScalar(.4 + .6 * intro.shadow); this.loafShadow.material.opacity = .32 * intro.shadow; }
+    for (const [i, plate] of this.plates.entries()) {
+      const wobble = intro && !calm ? intro.plates * Math.sin(time * 60 + (i >> 1)) : 0;
+      plate.mesh.position.y = plate.y + Math.max(0, wobble); plate.mesh.rotation.z = wobble * 2;
+    }
+    // Ending: once the boss has bowed, its crown lifts off its head and arcs onto the champion's (ending clock).
+    if (this.crownDrop >= 0 && this.ending) {
+      const player = this.actors.player!, top = BREADS[battle.player.bread].height, u = calm ? 1 : clamp((this.endingClock - this.crownDrop) / .9, 0, 1);
+      if (u <= 0) return;
+      if (!this.crownFrom) { this.crownFrom = this.crown.getWorldPosition(new THREE.Vector3()); this.scene.attach(this.crown); }
+      if (u < 1) {
+        const ease = 1 - (1 - u) ** 3, to = player.mesh.localToWorld(new THREE.Vector3(0, top + .08, 0));
+        this.crown.position.lerpVectors(this.crownFrom, to, ease); this.crown.position.y += Math.sin(Math.PI * u) * .9;
+        this.crown.rotation.set(0, ease * Math.PI * 2, 0);
+      } else if (this.crown.parent !== player.mesh) { player.mesh.add(this.crown); this.crown.position.set(0, top + .08, 0); this.crown.rotation.set(0, 0, 0); }
+    }
+  }
+  // The crown sits on the boss loaf's crust, a little askew (and nowhere in other matches).
+  private seatCrown(): void {
+    this.crown.removeFromParent(); this.crownDrop = -1; this.crownFrom = null;
+    const boss = this.actors.cpu;
+    if (boss && this.ids.endsWith(`/${BOSS_ID}`)) { boss.mesh.add(this.crown); this.crown.position.set(.08, BREADS.ikkin.height + .04, .25); this.crown.rotation.set(.12, 0, -.12); }
+  }
+  // Boss ending: the crown leaves the defeated loaf and settles on the champion.
+  crownChampion(at = 1.5): void { if (this.crown.parent) { this.crownDrop = at; this.crownFrom = null; } }
+  // The champion ending hands over to the run result: keep the celebration, lower the view under the sheet.
+  tiltEnding(): void { if (this.ending && !this.ending.tilt) this.ending = { ...this.ending, tilt: true, tiltFrom: this.endingClock }; }
+  // Advances the result / champion animation clock (seconds). Not called while paused or hidden.
+  tickEnding(dt: number): void { if (this.ending && Number.isFinite(dt) && dt > 0) this.endingClock += dt; }
+  // Entrance landing: a burst of crumbs from the loaf touching down.
+  introImpact(): void {
+    if (this.reducedMotion.matches) return;
+    for (let i = 0; i < 18; i++) this.crumb('ikkin', (i % 6 - 2.5) * .25, .1, -1.2 + (i % 3 - 1) * .4, i, 1.4);
+    this.shake = Math.max(this.shake, .14);
+  }
   private updateStance(battle: BattleView, cue: StanceCue | undefined, time: number): void {
     this.stance.visible = !!cue && !this.ending;
     if (!cue) return;
@@ -609,8 +779,9 @@ export class TableRenderer {
     const [color, opacity, grow] = cue === 'charged' ? [`hsl(${this.reducedMotion.matches ? 42 : 30 + 20 * pulse}, 95%, 58%)`, .6 + .35 * pulse, .08 * pulse] : cue === 'counter' ? ['#f2b53a', .55 + .4 * pulse, .12 * pulse] : cue === 'locked' ? ['#8a8575', .32, 0] : cue === 'recovery' ? ['#b7a98a', .28, 0] : ['#6f9a64', .5, 0];
     m.color.set(color); m.opacity = opacity; this.stance.scale.multiplyScalar(1 + grow);
   }
-  setEnding(winner: Side | 'draw' | null): void {
-    this.ending = winner === null ? null : { winner, start: performance.now() };
+  // tilt: lower the view for a result sheet (false for the boss's champion ending, which keeps the breads centre stage).
+  setEnding(winner: Side | 'draw' | null, tilt = true): void {
+    this.ending = winner === null ? null : { winner, tilt, tiltFrom: 0 }; this.endingClock = 0;
     if (winner !== null) for (const set of Object.values(this.marks)) for (const mark of Object.values(set).flat()) mark.visible = false;
   }
   // Screen position (CSS px within the canvas) of a point above the given side's bread.
@@ -619,7 +790,7 @@ export class TableRenderer {
     return { x: (v.x + 1) / 2 * this.canvas.clientWidth, y: (1 - v.y) / 2 * this.canvas.clientHeight };
   }
   // Offscreen stills from the loaded templates, rendered with one throwaway context. Framing centres on the face.
-  private stills(jobs: { bread: BreadId; face: FaceFrame; px: number; close: number }[]): (string | undefined)[] {
+  private stills(jobs: { bread: FighterId; face: FaceFrame; px: number; close: number }[]): (string | undefined)[] {
     const result: (string | undefined)[] = [], canvas = document.createElement('canvas');
     let renderer: THREE.WebGLRenderer | undefined; const rigs: FaceRig[] = [];
     try {
@@ -645,15 +816,15 @@ export class TableRenderer {
     return result;
   }
   // Menu / cut-in thumbnails with the resting face.
-  thumbnails(size = 144): Partial<Record<BreadId, string>> {
+  thumbnails(size = 144): Partial<Record<FighterId, string>> {
     const ids = [...this.templates.keys()], shots = this.stills(ids.map(bread => ({ bread, face: new FaceState(bread).update(0, REST, true), px: size, close: THUMB_CLOSE[bread] })));
-    const result: Partial<Record<BreadId, string>> = {};
+    const result: Partial<Record<FighterId, string>> = {};
     ids.forEach((id, i) => { if (shots[i]) result[id] = shots[i]; });
     return result;
   }
   // Draws the four HUD close-ups for one bread, once. Call it only from menus (after loading, when a bread is picked):
   // it blocks for a moment, which mid-match would trip the long-frame pause.
-  preparePortraits(bread: BreadId): void {
+  preparePortraits(bread: FighterId): void {
     if (!this.portraits[bread] && this.templates.has(bread)) {
       const faces = MOODS.map(mood => {
         const state = new FaceState(bread); state.update(0, REST, true);
@@ -665,10 +836,10 @@ export class TableRenderer {
     }
   }
   // HUD face close-up for the player's current mood; undefined until preparePortraits() drew it (never drawn here).
-  portrait(bread: BreadId, mood: Mood): string | undefined { return this.portraits[bread]?.[mood] || undefined; }
+  portrait(bread: FighterId, mood: Mood): string | undefined { return this.portraits[bread]?.[mood] || undefined; }
   playerMood(): Mood { return this.mood; }
   noteLatency(ms: number): void { if (Number.isFinite(ms) && ms >= 0) this.latencies.push(ms); }
-  resetMetrics(): void { this.frames = []; this.latencies = []; this.ending = null; this.resetEffects(true); }
+  resetMetrics(): void { this.frames = []; this.latencies = []; this.ending = null; this.heat = 0; this.resetEffects(true); }
   projectedBounds(): Record<string, { left: number; right: number; top: number; bottom: number }> {
     const result: Record<string, { left: number; right: number; top: number; bottom: number }> = {};
     for (const [side, actor] of Object.entries(this.actors)) {

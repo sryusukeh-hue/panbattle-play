@@ -1,4 +1,4 @@
-import { STEP, clamp, mix, type BreadId } from './rules';
+import { STEP, clamp, mix, type FighterId } from './rules';
 
 // Special-move ("ひっさつ") data shared by the CPU battle core and the renderer.
 // Values come from plans/EXECPLAN-SPECIAL.md (designed with Codex gpt-6-astra, 2026-09-27).
@@ -20,7 +20,7 @@ export interface SpecialSpec {
   rx: number; rz: number; stages: readonly SpecialStage[]; keys: readonly Key[];
 }
 const T = (seconds: number): number => Math.round(seconds / STEP);
-export const SPECIALS: Record<BreadId, SpecialSpec> = {
+export const SPECIALS: Record<FighterId, SpecialSpec> = {
   shokupan: {
     name: '爆熱ギガトースト', kicker: '爆熱', title: 'ギガトースト', ruby: 'ばくねつギガトースト', shout: 'ギガトースト！', color: '#ffb63a', sfx: ['ドーン！'],
     windup: .70, active: .15, recovery: .85, lock: .25, rx: .68, rz: .50,
@@ -125,27 +125,45 @@ export const SPECIALS: Record<BreadId, SpecialSpec> = {
       { t: 1.70, at: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] },
     ],
   },
+  // Boss (plans/EXECPLAN-BOSS.md 2.1, designed with Codex gpt-6-astra, 2026-10-02): sink, rise, then land face-first.
+  // The long wind-up is the whole telegraph (the CPU adds nothing); the 1.25 s slump after it is the reward.
+  ikkin: {
+    name: '超重量一斤プレス', kicker: '超重量', title: '一斤プレス', ruby: 'ちょうじゅうりょういっきんプレス', shout: 'どっしーん！', color: '#ffc260', sfx: ['ドッシーン！'],
+    windup: 1.10, active: .20, recovery: 1.25, lock: .35, rx: .78, rz: .40,
+    stages: [{ from: 132, to: 156, damage: 34, stop: .0833, recoil: true }],
+    keys: [
+      { t: 0, at: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] },
+      { t: .25, at: [0, -.10, -.08], rot: [-.12, 0, 0], scale: [1.05, .92, 1.02] },
+      { t: .65, at: [.60, .50, .60], rot: [-.06, 0, 0], scale: [1, 1.03, 1] },
+      { t: .90, at: [1, .75, 1], rot: [.18, 0, 0], scale: [1.03, 1.02, 1.02] },
+      { t: 1.10, at: [1, 0, 1.90], rot: [1.10, 0, 0], scale: [1.08, .92, 1.04], ease: 'in' },
+      { t: 1.30, at: [1, 0, 1.90], rot: [1.10, 0, 0], scale: [1.08, .92, 1.04] },
+      { t: 1.65, at: [.75, .06, 1.25], rot: [.65, 0, 0], scale: [1.02, .99, 1.02] },
+      { t: 2.00, at: [.40, .04, .55], rot: [.25, 0, 0], scale: [1, 1, 1] },
+      { t: 2.55, at: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] },
+    ],
+  },
 };
 // Furthest a move's sideways swipe strays from its aim; telegraphs and CPU dodge decisions widen by it.
-export const specialSweep = (bread: BreadId): number => Math.max(...SPECIALS[bread].keys.map(k => Math.abs(k.side ?? 0)));
+export const specialSweep = (bread: FighterId): number => Math.max(...SPECIALS[bread].keys.map(k => Math.abs(k.side ?? 0)));
 // A successful dodge fills the meter; the melon pan's crisp crust earns a little more (three dodges fill it).
-export const dodgeGain = (bread: BreadId): number => bread === 'melonpan' ? 35 : METER_GAIN.dodge;
-export const specialDuration = (bread: BreadId, extra = 0): number => {
+export const dodgeGain = (bread: FighterId): number => bread === 'melonpan' ? 35 : METER_GAIN.dodge;
+export const specialDuration = (bread: FighterId, extra = 0): number => {
   const s = SPECIALS[bread]; return s.windup + extra + s.active + s.recovery;
 };
 // Motion time: a CPU wind-up stretch slows only the wind-up section; active and recovery keep their timing.
-export function motionTime(bread: BreadId, age: number, extra = 0): number {
+export function motionTime(bread: FighterId, age: number, extra = 0): number {
   const windup = SPECIALS[bread].windup;
   return age < windup + extra ? age * windup / (windup + extra) : age - extra;
 }
-export const motionTick = (bread: BreadId, age: number, extra = 0): number => Math.round(motionTime(bread, age, extra) / STEP);
+export const motionTick = (bread: FighterId, age: number, extra = 0): number => Math.round(motionTime(bread, age, extra) / STEP);
 // Index of the hit stage that is live at this motion tick, or -1 between stages.
-export function liveStage(bread: BreadId, tick: number): number {
+export function liveStage(bread: FighterId, tick: number): number {
   return SPECIALS[bread].stages.findIndex(stage => tick >= stage.from && tick < stage.to);
 }
 export interface SpecialFrame { alpha: number; lift: number; travel: number; side: number; lean: number; yaw: number; roll: number; scale: [number, number, number] }
 const smooth = (u: number): number => u * u * (3 - 2 * u);
-export function specialFrame(bread: BreadId, t: number): SpecialFrame {
+export function specialFrame(bread: FighterId, t: number): SpecialFrame {
   const keys = SPECIALS[bread].keys, time = clamp(t, 0, keys[keys.length - 1]!.t);
   let i = 1; while (i < keys.length - 1 && keys[i]!.t < time) i++;
   const a = keys[i - 1]!, b = keys[i]!, raw = b.t === a.t ? 1 : clamp((time - a.t) / (b.t - a.t), 0, 1);

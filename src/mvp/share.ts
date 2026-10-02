@@ -1,9 +1,9 @@
-import { BREADS, type BreadId } from './config';
+import { BREADS, type FighterId } from './config';
 import type { Outcome, Scores } from './battle';
 import { rate } from './save';
 
 export interface ResultExtra { rank: string; score: number; level: string }
-export async function resultImage(player: BreadId, cpu: BreadId, outcome: Outcome, scores: Scores, extra?: ResultExtra): Promise<File> {
+export async function resultImage(player: FighterId, cpu: FighterId, outcome: Outcome, scores: Scores, extra?: ResultExtra): Promise<File> {
   const canvas = document.createElement('canvas'); canvas.width = 1080; canvas.height = 1080;
   const c = canvas.getContext('2d'); if (!c) throw new Error('canvas unavailable');
   c.fillStyle = '#faf2de'; c.fillRect(0, 0, 1080, 1080);

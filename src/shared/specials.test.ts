@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BREAD_IDS, BREADS, LIMIT, STEP, type BreadId } from './rules';
+import { BREAD_IDS, BREADS, LIMIT, STEP, type BreadId, type FighterId } from './rules';
 import { createBattle, stepBattle, startAttack, startSpecial, canSpecial, pose, phase, specialTouching, otherSlot, SLOTS, type BattleState, type BattleEvent, type Commands } from './battle';
 import { SPECIALS, METER_GAIN, METER_MAX, specialFrame, specialDuration, dodgeGain, motionTime, liveStage } from './specials';
 
@@ -10,7 +10,7 @@ function run(s: BattleState, seconds: number, commands = still(s), events: Battl
 function cpuBattle(a: BreadId, b: BreadId, practice = false): BattleState {
   const s = createBattle(a, b, 'cpu', practice); s.specials = true; s.fighters.A.meter = 0; s.fighters.B.meter = 0; return s;
 }
-const total = (bread: BreadId): number => SPECIALS[bread].stages.reduce((n, stage) => n + stage.damage, 0);
+const total = (bread: FighterId): number => SPECIALS[bread].stages.reduce((n, stage) => n + stage.damage, 0);
 const combinations = BREAD_IDS.flatMap(a => BREAD_IDS.map(b => [a, b] as const));
 
 describe('special move data', () => {

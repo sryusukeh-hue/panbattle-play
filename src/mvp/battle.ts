@@ -1,4 +1,4 @@
-import { BREADS, LIMIT, STEP, clamp, type BreadId } from './config';
+import { BREADS, BOSS_ID, LIMIT, STEP, clamp, type FighterId } from './config';
 import { createBattle, startAttack, startSpecial, canSpecial, stepBattle, phase, pose as sharedPose, type Slot, type Fighter, type Pose, type BattleEvent as SharedEvent } from '../shared/battle';
 import { SPECIALS, METER_MAX, CUTIN_SECONDS, specialDuration, specialSweep } from '../shared/specials';
 export { phase, movable, touching, emptyScores, type Attack, type Fighter, type Pose, type Metric, type Scores } from '../shared/battle';
@@ -18,7 +18,10 @@ export const CPU_STYLE = {
   melonpan: { interval: 3.1, jitter: .8, pair: .20, pairInterval: 2.8, move: .45, observe: 2.5 },
   currypan: { interval: 3.4, jitter: 1.0, pair: .15, pairInterval: 3.0, move: .22, observe: 3.1 },
   creampan: { interval: 3.0, jitter: 1.0, pair: .32, pairInterval: 2.7, move: .48, observe: 2.4 },
-} as const satisfies Record<BreadId, { interval: number; jitter: number; pair: number; pairInterval: number; move: number; observe: number }>;
+  // The boss never pairs swings: one big, readable blow at a time (plans/EXECPLAN-BOSS.md 2).
+  ikkin: { interval: 3.10, jitter: .35, pair: 0, pairInterval: 3.10, move: .22, observe: 3.40 },
+} as const satisfies Record<FighterId, CpuStyle>;
+export interface CpuStyle { interval: number; jitter: number; pair: number; pairInterval: number; move: number; observe: number }
 export type Difficulty = 'gentle' | 'normal' | 'hard';
 export const DIFFICULTIES: readonly Difficulty[] = ['gentle', 'normal', 'hard'];
 // windup/recovery pad the CPU swing; pace scales attack intervals.
@@ -34,8 +37,27 @@ export const DIFFICULTY = {
     specialWait: .75, specialWindup: .2, specialDodge: .2, specialReact: .25 },
   hard: { label: 'つよい', windup: .2, recovery: .15, pace: .3, dodge: .3, spam: .6, react: .07, punish: true, gap: .15, damage: 1.4, grace: .3,
     specialWait: .45, specialWindup: .1, specialDodge: .35, specialReact: .2 },
-} as const satisfies Record<Difficulty, { label: string; windup: number; recovery: number; pace: number; dodge: number; spam: number; react: number; punish: boolean; gap: number; damage: number; grace: number;
-  specialWait: number; specialWindup: number; specialDodge: number; specialReact: number }>;
+} as const satisfies Record<Difficulty, CpuProfile>;
+// A CPU difficulty; the challenge course (src/mvp/challenge.ts) and the boss pass their own instead of a named level.
+// seize: a full meter may fire on any visible player gap (otherwise it waits for the next planned swing).
+export interface CpuProfile { label: string; windup: number; recovery: number; pace: number; dodge: number; spam: number; react: number; punish: boolean; gap: number; damage: number; grace: number;
+  specialWait: number; specialWindup: number; specialDodge: number; specialReact: number; seize?: boolean }
+// Boss AI by form (plans/EXECPLAN-BOSS.md 2). The second form shortens the rest between blows, never the telegraph.
+export const BOSS = {
+  hpPhase2: 90, speed: 1.8, limit: 90,
+  // First charge: after 4 s or at 70% HP. Later charges: 10 s after the previous special began. Specials start >= 8 s apart.
+  firstChargeAt: 4, firstChargeHp: .70, rechargeAfter: 10, specialGap: 8,
+  phase1: { label: 'ボス', windup: .40, recovery: .25, pace: 1, dodge: 0, spam: 0, react: .25, punish: false, gap: .45, damage: 1, grace: 0,
+    specialWait: 1.0, specialWindup: 0, specialDodge: 0, specialReact: .35, seize: false } as CpuProfile,
+  phase2: { label: 'ボス', windup: .40, recovery: .15, pace: 1, dodge: 0, spam: 0, react: .25, punish: false, gap: .35, damage: 1, grace: 0,
+    specialWait: .80, specialWindup: 0, specialDodge: 0, specialReact: .35, seize: false } as CpuProfile,
+  style2: { interval: 2.75, jitter: .25, pair: 0, pairInterval: 2.75, move: .30, observe: 3.00 } as CpuStyle,
+} as const;
+// The boss's crust guard (see BattleState.guard): a normal hit outside its recovery deals a quarter. Mashing at it never
+// works; dodging its blow and striking back does (plans/EXECPLAN-BOSS.md 2.2).
+export const BOSS_GUARD = .25;
+// The optional helper offered after two defeats in the challenge: every CPU wind-up (normal and special) is slower.
+export const ASSIST_WINDUP = .25;
 export const PRACTICE_SPECIAL_STAGE = 3;
 // CPU-only rule (plans/EXECPLAN-SPECIAL.md 4): once per match, at 60% HP or less, the CPU visibly charges its meter over 1.5 s
 // so players also get to see, dodge and punish a CPU special. The player's meter rules are unchanged.
@@ -57,14 +79,27 @@ export class Battle {
   private nextCpu = 1.5; private nextMove = 3.2; private cpuTarget = 0;
   private secondAttack = false; private judged = 0; private sidestep = 0; private lastSwingEnd = -Infinity; private seenSwing = 0; private mashed = 0;
   readonly difficulty: Difficulty;
-  constructor(player: BreadId, cpu: BreadId, options: { practice?: boolean; seed?: number; difficulty?: Difficulty } = {}) {
+  // Boss form (1, then 2 from BOSS.hpPhase2) and when the second form began (presentation); 0 for other CPUs.
+  bossPhase: 0 | 1 | 2 = 0; phaseShiftAt = -1;
+  readonly assist: boolean;
+  private profile: CpuProfile | undefined; private lastSpecialAt = -Infinity; private chargesUsed = 0;
+  constructor(player: FighterId, cpu: FighterId, options: { practice?: boolean; seed?: number; difficulty?: Difficulty; profile?: CpuProfile | undefined; limit?: number | undefined; assist?: boolean } = {}) {
     this.state = createBattle(player, cpu, 'cpu', options.practice ?? false);
     this.difficulty = options.practice ? 'gentle' : options.difficulty ?? 'gentle';
-    const level = DIFFICULTY[this.difficulty];
-    this.state.cpuExtra = { windup: level.windup, recovery: level.recovery, counters: level.punish, damage: level.damage, grace: level.grace };
+    this.assist = !options.practice && !!options.assist;
+    if (cpu === BOSS_ID && !options.practice) {
+      this.bossPhase = 1; this.profile = BOSS.phase1;
+      Object.assign(this.state, { limit: BOSS.limit, koOnly: true, cpuSpeed: BOSS.speed, guard: BOSS_GUARD });
+    } else if (!options.practice) { this.profile = options.profile; if (options.limit) this.state.limit = options.limit; }
+    const level = this.level;
+    this.state.cpuExtra = { windup: level.windup + (this.assist ? ASSIST_WINDUP : 0), recovery: level.recovery, counters: level.punish, damage: level.damage, grace: level.grace };
     this.state.specials = true; this.state.fighters.A.meter = 0; this.state.fighters.B.meter = 0;
     this.seed = options.seed ?? 42;
   }
+  // The CPU's current difficulty: the boss's form, a course profile, or the named level.
+  get level(): CpuProfile { return this.profile ?? DIFFICULTY[this.difficulty]; }
+  private get style(): CpuStyle { return this.bossPhase === 2 ? BOSS.style2 : CPU_STYLE[this.cpu.bread]; }
+  get limit(): number { return this.state.limit ?? 60; }
   get player() { return this.state.fighters.A; }
   get cpu() { return this.state.fighters.B; }
   get elapsed() { return this.state.elapsed; }
@@ -100,17 +135,18 @@ export class Battle {
     if (players.length && this.allowed('player') && startSpecial(this.state, 'A', events)) started.push('player');
     if (cpuExtra !== null && startSpecial(this.state, 'B', events, cpuExtra)) started.push('cpu');
     if (started.length) { this.freeze = CUTIN_SECONDS; this.accumulator = 0; this.cutin = { side: started.length > 1 ? 'both' : started[0]!, left: CUTIN_SECONDS }; }
-    if (started.includes('cpu')) { this.nextCpu = this.elapsed + specialDuration(this.cpu.bread, cpuExtra ?? 0) + DIFFICULTY[this.difficulty].gap; this.secondAttack = false; }
+    if (started.includes('cpu')) { this.nextCpu = this.elapsed + specialDuration(this.cpu.bread, cpuExtra ?? 0) + this.level.gap; this.secondAttack = false; this.lastSpecialAt = this.elapsed; }
     this.append(events); return started.length > 0;
   }
   // Whether the CPU would fire its special on the tick ending at nextTime (also used to accept both sides together).
   private cpuSpecialDue(nextTime: number): boolean {
-    const level = DIFFICULTY[this.difficulty], full = (this.cpu.meter ?? 0) >= METER_MAX;
+    const level = this.level, full = (this.cpu.meter ?? 0) >= METER_MAX;
     if (!full) this.fullSince = Infinity; else if (!Number.isFinite(this.fullSince)) this.fullSince = nextTime;
     if (!this.cpuEnabled || !full || nextTime - this.fullSince < level.specialWait || !canSpecial(this.state, 'B')) return false;
     if (this.practice) return this.practiceStage === PRACTICE_SPECIAL_STAGE && this.specialStep === 'dodge';
+    if (this.bossPhase && nextTime - this.lastSpecialAt < BOSS.specialGap) return false;
     const gap = phase(this.player) === 'recovery' || this.player.recoil > 0;
-    return nextTime >= this.nextCpu || (this.difficulty !== 'gentle' && gap);
+    return nextTime >= this.nextCpu || ((level.seize ?? this.difficulty !== 'gentle') && gap);
   }
   canSpecial(side: Side): boolean { return !this.paused && !this.outcome && this.freeze <= 0 && this.allowed(side); }
   // In the special drill the player may only fire in the "fire" step, after seeing and dodging the CPU's special.
@@ -146,11 +182,21 @@ export class Battle {
         if (this.cpuSpecialDue(nextTime) && this.specials([], this.cpuExtra())) break;
       }
       if (this.cpuEnabled && !this.practice) {
-        // The once-per-match CPU charge (see CPU_RAGE).
-        const low = this.cpu.hp <= BREADS[this.cpu.bread].hp * CPU_RAGE.hp && this.cpu.hp > 0;
-        if (!this.rageUsed && low && (this.cpu.meter ?? 0) < METER_MAX) {
+        if (this.bossPhase === 1 && this.cpu.hp <= BOSS.hpPhase2 && this.cpu.hp > 0) {
+          // Second form from the next action on: the running swing keeps its timings (startAttack read them already).
+          this.bossPhase = 2; this.phaseShiftAt = this.elapsed; this.profile = BOSS.phase2;
+          this.state.cpuExtra = { ...this.state.cpuExtra!, recovery: BOSS.phase2.recovery };
+        }
+        // The once-per-match CPU charge (see CPU_RAGE); the boss charges on its own schedule instead.
+        const hpMax = BREADS[this.cpu.bread].hp, meter = this.cpu.meter ?? 0;
+        const due = this.bossPhase
+          ? this.cpu.hp > 0 && meter < METER_MAX && !this.cpu.attack?.special && (this.chargesUsed === 0
+            ? this.elapsed >= BOSS.firstChargeAt || this.cpu.hp <= hpMax * BOSS.firstChargeHp
+            : this.elapsed - this.lastSpecialAt >= BOSS.rechargeAfter)
+          : !this.rageUsed && this.cpu.hp <= hpMax * CPU_RAGE.hp && this.cpu.hp > 0 && meter < METER_MAX;
+        if (due && !this.cpuCharging) {
           // Fills whatever is missing over the full charge time, so it always reads as a 1.5 s build-up.
-          this.cpuCharging = true; this.rageUsed = true; this.rageFrom = this.cpu.meter ?? 0; this.rageStart = this.elapsed;
+          this.cpuCharging = true; this.rageUsed = true; this.chargesUsed++; this.rageFrom = meter; this.rageStart = this.elapsed;
         }
         if (this.cpuCharging) {
           // Follows the planned 1.5 s ramp; gains earned meanwhile may run ahead of it but cannot finish the charge early.
@@ -160,7 +206,7 @@ export class Battle {
         }
       }
       if (this.cpuEnabled && (!this.practice || (this.practiceStage > 0 && this.practiceStage !== PRACTICE_SPECIAL_STAGE))) {
-        const style = CPU_STYLE[this.cpu.bread], level = DIFFICULTY[this.difficulty];
+        const style = this.style, level = this.level;
         const swing = this.player.attack;
         if (swing && swing.id !== this.seenSwing) {
           this.seenSwing = swing.id;
@@ -219,7 +265,7 @@ export class Battle {
     }
   }
   setPaused(value: boolean): void { this.paused = value; this.accumulator = 0; }
-  private cpuExtra(): number { return this.practice ? DIFFICULTY.gentle.specialWindup : DIFFICULTY[this.difficulty].specialWindup; }
+  private cpuExtra(): number { return (this.practice ? DIFFICULTY.gentle.specialWindup : this.level.specialWindup) + (this.assist ? ASSIST_WINDUP : 0); }
   // Practice stage 4: the CPU (in the middle) fires its special for the player to dodge, then the player's meter fills.
   enterSpecialPractice(): void {
     this.practiceStage = PRACTICE_SPECIAL_STAGE; this.specialStep = 'dodge'; this.player.meter = 0; this.cpu.meter = METER_MAX;
