@@ -117,6 +117,28 @@ describe('special move feedback', () => {
 });
 
 describe('presentation replay buffer', () => {
+  it('records a 100ms held contact in real time and plays the hold for 200ms at half speed', () => {
+    const replay = new ReplayBuffer<string>(); replay.record(0, 'before'); replay.record(.01, 'contact');
+    for (let i = 0; i < 10; i++) replay.record(.01, 'contact');
+    replay.record(.01, 'released'); replay.start();
+    expect(replay.next(.021)!.value).toBe('contact');
+    expect(replay.next(.198)!.value).toBe('contact');
+    expect(replay.next(.023)!.value).toBe('released');
+  });
+  it('keeps the contact sound once while a frozen state is recorded repeatedly, including after a pause', () => {
+    const battle = new Battle('shokupan', 'shokupan'), feedback = new BattleFeedback(), replay = new ReplayBuffer<number>();
+    battle.cpuEnabled = false; battle.attack('player');
+    for (let i = 0; i < 120 && !battle.hitStopping; i++) battle.advance(1 / 120, 0);
+    const events = battle.drainEvents(); events.forEach(e => feedback.enqueue(e));
+    expect(feedback.update(battle, true).sound).toBe('hit');
+    const contact = battle.elapsed;
+    for (let i = 0; i < 6; i++) {
+      battle.advance(1 / 60, 0); replay.record(1 / 60, battle.elapsed);
+      events.forEach(e => feedback.enqueue(e)); expect(feedback.update(battle, true).sound).toBeNull();
+    }
+    feedback.reset(); events.forEach(e => feedback.enqueue(e)); expect(feedback.update(battle, true).sound).toBeNull();
+    replay.start(); expect(replay.next(.1)!.value).toBe(contact);
+  });
   it('limits playback to the decisive window', () => {
     const replay = new ReplayBuffer<number>(); for (let i = 0; i <= 200; i++) replay.record(.01, i);
     expect(replay.start(false, .5)).toBe(true); expect(replay.next(0)!.value).toBeGreaterThanOrEqual(150);

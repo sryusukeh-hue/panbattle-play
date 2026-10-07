@@ -24,7 +24,7 @@ export const SPECIALS: Record<FighterId, SpecialSpec> = {
   shokupan: {
     name: '爆熱ギガトースト', kicker: '爆熱', title: 'ギガトースト', ruby: 'ばくねつギガトースト', shout: 'ギガトースト！', color: '#ffb63a', sfx: ['ドーン！'],
     windup: .70, active: .15, recovery: .85, lock: .25, rx: .68, rz: .50,
-    stages: [{ from: T(.70), to: T(.85), damage: 32, stop: .0833, recoil: true }],
+    stages: [{ from: T(.70), to: T(.85), damage: 32, stop: 16 * STEP, recoil: true }],
     keys: [
       { t: 0, at: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] },
       { t: .15, at: [0, -.10, -.08], rot: [-.16, -.08, .10], scale: [1.06, .90, 1.04] },
@@ -39,7 +39,7 @@ export const SPECIALS: Record<FighterId, SpecialSpec> = {
   francepan: {
     name: '雷光バゲットブレイカー', kicker: '雷光', title: 'バゲットブレイカー', ruby: 'らいこうバゲットブレイカー', shout: 'バゲットブレイカー！', color: '#9fd8ff', sfx: ['ズバァッ！'],
     windup: .60, active: .10, recovery: 1.00, lock: .35, rx: .24, rz: 1.02,
-    stages: [{ from: T(.60), to: T(.70), damage: 36, stop: .0833, recoil: true }],
+    stages: [{ from: T(.60), to: T(.70), damage: 36, stop: 16 * STEP, recoil: true }],
     keys: [
       { t: 0, at: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] },
       { t: .20, at: [0, -.04, -.16], rot: [-.20, -.18, -.12], scale: [1, .97, 1] },
@@ -55,9 +55,9 @@ export const SPECIALS: Record<FighterId, SpecialSpec> = {
     name: '三日月トルネード', kicker: '三日月', title: 'トルネード', ruby: 'みかづきトルネード', shout: '三日月トルネード！', color: '#ffd76a', sfx: ['シュッ', 'シュッ', 'ドン！'],
     windup: .55, active: .40, recovery: .55, lock: .15, rx: .68, rz: .40,
     stages: [
-      { from: 66, to: 74, damage: 6, stop: 0, recoil: false },
-      { from: 86, to: 94, damage: 6, stop: 0, recoil: false },
-      { from: 106, to: 114, damage: 16, stop: .0667, recoil: true },
+      { from: 66, to: 74, damage: 6, stop: 3 * STEP, recoil: false },
+      { from: 86, to: 94, damage: 6, stop: 3 * STEP, recoil: false },
+      { from: 106, to: 114, damage: 16, stop: 14 * STEP, recoil: true },
     ],
     keys: [
       { t: 0, at: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] },
@@ -76,7 +76,7 @@ export const SPECIALS: Record<FighterId, SpecialSpec> = {
     name: 'ころころメロンローラー', kicker: 'ころころ', title: 'メロンローラー', ruby: 'ころころメロンローラー', shout: 'ころころ、メロンローラー！', color: '#b8dc62', sfx: ['ゴロゴロッ！'],
     windup: .80, active: .50, recovery: .80, lock: .25, rx: .55, rz: .45,
     // One hit, but the roller stays on the spot for the whole half second.
-    stages: [{ from: 96, to: 156, damage: 26, stop: .0667, recoil: true }],
+    stages: [{ from: 96, to: 156, damage: 26, stop: 14 * STEP, recoil: true }],
     keys: [
       { t: 0, at: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] },
       { t: .20, at: [0, -.08, -.10], rot: [-.12, 0, -.20], scale: [1.06, .92, 1.04] },
@@ -93,8 +93,8 @@ export const SPECIALS: Record<FighterId, SpecialSpec> = {
     windup: .60, active: .60, recovery: .90, lock: .30, rx: .36, rz: .55,
     // Two beats on the same locked aim with a .40 s gap: a fighter hit by the first can still step out of the second.
     stages: [
-      { from: 72, to: 84, damage: 10, stop: 0, recoil: false },
-      { from: 132, to: 144, damage: 24, stop: .0833, recoil: true },
+      { from: 72, to: 84, damage: 10, stop: 4 * STEP, recoil: false },
+      { from: 132, to: 144, damage: 24, stop: 18 * STEP, recoil: true },
     ],
     keys: [
       { t: 0, at: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] },
@@ -114,7 +114,7 @@ export const SPECIALS: Record<FighterId, SpecialSpec> = {
     name: 'ふわっとクリームパーン', kicker: 'ふわっと', title: 'クリームパーン', ruby: 'ふわっとクリームパーン', shout: 'クリーム、パーン！', color: '#ffe3a1', sfx: ['パーン！'],
     windup: .65, active: .35, recovery: .70, lock: .20, rx: .42, rz: .42,
     // One hit anywhere along a sideways swipe across the locked aim.
-    stages: [{ from: 78, to: 120, damage: 28, stop: .0667, recoil: true }],
+    stages: [{ from: 78, to: 120, damage: 28, stop: 14 * STEP, recoil: true }],
     keys: [
       { t: 0, at: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] },
       { t: .20, at: [0, -.05, -.08], rot: [-.10, -.20, -.12], scale: [1.06, .94, 1] },
@@ -130,7 +130,7 @@ export const SPECIALS: Record<FighterId, SpecialSpec> = {
   ikkin: {
     name: '超重量一斤プレス', kicker: '超重量', title: '一斤プレス', ruby: 'ちょうじゅうりょういっきんプレス', shout: 'どっしーん！', color: '#ffc260', sfx: ['ドッシーン！'],
     windup: 1.10, active: .20, recovery: 1.25, lock: .35, rx: .78, rz: .40,
-    stages: [{ from: 132, to: 156, damage: 34, stop: .0833, recoil: true }],
+    stages: [{ from: 132, to: 156, damage: 34, stop: 18 * STEP, recoil: true }],
     keys: [
       { t: 0, at: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] },
       { t: .25, at: [0, -.10, -.08], rot: [-.12, 0, 0], scale: [1.05, .92, 1.02] },

@@ -9,7 +9,21 @@ export type BattleEvent = Omit<SharedEvent, 'side'> & { side: Side };
 const slot = (side: Side): Slot => side === 'player' ? 'A' : 'B';
 export const pose = (fighter: Fighter, side: Side): Pose => sharedPose(fighter, slot(side));
 export interface BattleView { player: Fighter; cpu: Fighter }
-export const HIT_STOP_SECONDS = .070;
+export const HIT_STOP_SECONDS = 12 * STEP;
+export const HIT_STOP_COUNTER_SECONDS = 16 * STEP;
+export const HIT_STOP_CLASH_SECONDS = 10 * STEP;
+export const HIT_STOP_GUARD_SECONDS = 4 * STEP;
+export const HIT_STOP_KO_SECONDS = 22 * STEP;
+function hitStopForEvents(events: SharedEvent[], state: Battle['state']): number {
+  const counters = new Set(events.filter(e => e.kind === 'counter').map(e => e.side));
+  return Math.max(0, ...events.map(event => {
+    if (!['hit', 'clash', 'special-hit'].includes(event.kind)) return 0;
+    if (!state.practice && (state.fighters.A.hp <= 0 || state.fighters.B.hp <= 0)) return HIT_STOP_KO_SECONDS;
+    if (event.kind === 'clash') return HIT_STOP_CLASH_SECONDS;
+    if (event.kind === 'special-hit') return SPECIALS[state.fighters[event.side].bread].stages[event.stage ?? 0]?.stop ?? 0;
+    return event.guard ? HIT_STOP_GUARD_SECONDS : counters.has(event.side) ? HIT_STOP_COUNTER_SECONDS : HIT_STOP_SECONDS;
+  }));
+}
 export const CPU_RECOVER_GAP = .45;
 export const CPU_STYLE = {
   shokupan: { interval: 2.9, jitter: .9, pair: .28, pairInterval: 2.7, move: .35, observe: 2.8 },
@@ -71,6 +85,7 @@ export class Battle {
   events: BattleEvent[] = [];
   private accumulator = 0; private seed: number;
   private hitStop = 0;
+  private effectDt = 0;
   // Real-time freeze while the special cut-in plays; combat time never catches up afterwards.
   private freeze = 0; private fullSince = Infinity; private refillAt = Infinity; private rageUsed = false; private rageFrom = 0; private rageStart = 0;
   cutin: { side: Side | 'both'; left: number } | null = null;
@@ -122,6 +137,9 @@ export class Battle {
     }
   }
   get freezing(): boolean { return this.freeze > 0; }
+  get hitStopping(): boolean { return this.hitStop > 0; }
+  get hitStopRemaining(): number { return this.hitStop; }
+  get frameEffectDt(): number { return this.effectDt; }
   attack(side: Side): boolean {
     if (this.paused || this.hitStop > 0 || this.freeze > 0) return false;
     const events: SharedEvent[] = [], accepted = startAttack(this.state, slot(side), events);
@@ -148,10 +166,11 @@ export class Battle {
     const gap = phase(this.player) === 'recovery' || this.player.recoil > 0;
     return nextTime >= this.nextCpu || ((level.seize ?? this.difficulty !== 'gentle') && gap);
   }
-  canSpecial(side: Side): boolean { return !this.paused && !this.outcome && this.freeze <= 0 && this.allowed(side); }
+  canSpecial(side: Side): boolean { return !this.paused && !this.outcome && this.hitStop <= 0 && this.freeze <= 0 && this.allowed(side); }
   // In the special drill the player may only fire in the "fire" step, after seeing and dodging the CPU's special.
   private allowed(side: Side): boolean { return canSpecial(this.state, slot(side)) && !(side === 'player' && this.practice && this.practiceStage === PRACTICE_SPECIAL_STAGE && this.specialStep === 'dodge'); }
   advance(dt: number, target: number, attack = false, special = false): void {
+    this.effectDt = 0;
     if (this.paused || this.outcome || !Number.isFinite(dt) || dt <= 0) return;
     if (dt > .25) { this.setPaused(true); return; }
     if (this.freeze > 0) {
@@ -162,8 +181,12 @@ export class Battle {
       this.freeze = 0; this.cutin = null; attack = special = false;
       if (dt <= 1e-9) return;
     }
+    // Inputs received during a stop are dropped even if it ends within this frame.
+    if (this.hitStopping) attack = special = false;
     const stopped = Math.min(dt, this.hitStop); this.hitStop = Math.max(0, this.hitStop - stopped); dt -= stopped;
+    if (this.hitStop < 1e-9) this.hitStop = 0;
     if (dt <= 1e-9) return;
+    this.effectDt = dt;
     // A valid special wins over a normal swing pressed in the same frame; a CPU special due on the same tick joins it.
     if (special && this.allowed('player')) {
       const cpu = this.cpuSpecialDue(this.elapsed + STEP);
@@ -255,12 +278,10 @@ export class Battle {
       // Recorded right after the step so a swing that ends and restarts next frame still counts as mashing.
       if (swingBefore !== undefined && this.player.attack?.id !== swingBefore) this.lastSwingEnd = this.elapsed;
       this.append(events); this.accumulator -= STEP;
-      const stop = Math.max(0, ...events.map(event => event.kind === 'hit' || event.kind === 'clash' ? HIT_STOP_SECONDS
-        : event.kind === 'special-hit' ? SPECIALS[this.state.fighters[event.side].bread].stages[event.stage ?? 0]?.stop ?? 0 : 0));
+      const stop = hitStopForEvents(events, this.state);
       if (stop > 0) {
-        const consumed = Math.min(Math.max(0, this.accumulator), stop);
-        this.hitStop = stop - consumed; this.accumulator = Math.max(0, this.accumulator - consumed);
-        if (this.hitStop > 0) break;
+        // Always draw the contact once before consuming the stop.
+        this.hitStop = stop; this.accumulator = 0; this.effectDt = 0; break;
       }
     }
   }

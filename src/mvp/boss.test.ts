@@ -26,7 +26,7 @@ describe('boss roster isolation', () => {
     expect(BREAD_IDS).toHaveLength(6); expect(BREAD_IDS).not.toContain(BOSS_ID);
     expect(isBread(BOSS_ID)).toBe(false); expect(isBread('shokupan')).toBe(true);
     expect(BREADS.ikkin).toMatchObject({ hp: 180, damage: 24, reach: 1.72, width: .75, height: .80, depth: .65 });
-    expect(SPECIALS.ikkin.stages).toEqual([{ from: 132, to: 156, damage: 34, stop: .0833, recoil: true }]);
+    expect(SPECIALS.ikkin.stages).toEqual([{ from: 132, to: 156, damage: 34, stop: 18 * STEP, recoil: true }]);
   });
   it('leaves PvP at 60 s and 4.8 m/s even if CPU-only fields are present', () => {
     const s = createBattle('shokupan', 'croissant', 'pvp'); Object.assign(s, { cpuSpeed: 1, koOnly: true });

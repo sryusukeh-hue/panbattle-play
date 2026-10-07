@@ -1,11 +1,103 @@
 import { describe, expect, it } from 'vitest';
-import { Battle, CPU_RAGE, CPU_RECOVER_GAP, CPU_STYLE, DIFFICULTY, HIT_STOP_SECONDS, PRACTICE_SPECIAL_STAGE, phase, pose, touching } from './battle';
+import { Battle, CPU_RAGE, CPU_RECOVER_GAP, CPU_STYLE, DIFFICULTY, HIT_STOP_SECONDS, HIT_STOP_COUNTER_SECONDS, HIT_STOP_CLASH_SECONDS, HIT_STOP_GUARD_SECONDS, HIT_STOP_KO_SECONDS, PRACTICE_SPECIAL_STAGE, phase, pose, touching, type Side } from './battle';
 import { CUTIN_SECONDS, SPECIALS } from '../shared/specials';
-import { BREADS, BREAD_IDS, LIMIT, STEP, type BreadId } from './config';
-import { createBattle, startAttack, stepBattle, type BattleEvent as SharedEvent } from '../shared/battle';
+import { BREADS, BREAD_IDS, FIGHTER_IDS, LIMIT, STEP, type BreadId } from './config';
+import { createBattle, startAttack, startSpecial, stepBattle, type BattleEvent as SharedEvent } from '../shared/battle';
 
 function run(b: Battle, seconds: number, target = b.player.x): void { for (let i = 0; i < seconds / STEP; i++) b.advance(STEP, target); }
 function duel(p: BreadId = 'shokupan', c: BreadId = 'shokupan'): Battle { const b = new Battle(p, c); b.cpuEnabled = false; return b; }
+function untilStop(b: Battle, dt = STEP): void {
+  for (let i = 0; i < 4 / dt && !b.hitStopping; i++) b.advance(dt, 0);
+  expect(b.hitStopping).toBe(true); expect(b.frameEffectDt).toBe(0);
+}
+describe('synchronized CPU hit stop', () => {
+  it.each(['player', 'cpu'] as const)('normal and counter durations are symmetric for %s, using the batch maximum', side => {
+    for (const counter of [false, true]) {
+      const b = duel(); b.state.counters[side === 'player' ? 'A' : 'B'] = { available: counter, until: 10 };
+      b.attack(side); untilStop(b);
+      expect(b.hitStopRemaining).toBe(counter ? HIT_STOP_COUNTER_SECONDS : HIT_STOP_SECONDS);
+      expect(b.events.filter(e => e.kind === 'counter')).toHaveLength(counter ? 1 : 0);
+      expect(b.events.filter(e => e.kind === 'hit')).toHaveLength(1);
+    }
+  });
+  it('boss guard is short; an opening or counter has the ordinary or counter duration in either form', () => {
+    for (const form of [1, 2] as const) for (const mode of ['guard', 'opening', 'counter'] as const) {
+      const b = new Battle('shokupan', 'ikkin'); b.cpuEnabled = false; b.bossPhase = form;
+      if (mode === 'opening') { b.attack('cpu'); b.cpu.attack!.age = b.cpu.attack!.windup + BREADS.ikkin.active; }
+      if (mode === 'counter') b.state.counters.A = { available: true, until: 10 };
+      b.attack('player'); untilStop(b);
+      expect(b.hitStopRemaining).toBe(mode === 'guard' ? HIT_STOP_GUARD_SECONDS : mode === 'counter' ? HIT_STOP_COUNTER_SECONDS : HIT_STOP_SECONDS);
+      expect(b.events.find(e => e.kind === 'hit')?.guard ?? false).toBe(mode === 'guard');
+    }
+  });
+  it.each(FIGHTER_IDS)('every %s special stage stops for its specified ticks on either side', bread => {
+    const ticks = { shokupan: [16], francepan: [16], croissant: [3, 3, 14], melonpan: [14], currypan: [4, 18], creampan: [14], ikkin: [18] }[bread];
+    for (const side of ['player', 'cpu'] as Side[]) {
+      const b = new Battle(side === 'player' ? bread : 'shokupan', side === 'cpu' ? bread : 'shokupan'); b.cpuEnabled = false;
+      b.player.hp = b.cpu.hp = 1000; b[side].meter = 100;
+      expect(startSpecial(b.state, side === 'player' ? 'A' : 'B', [])).toBe(true);
+      for (const [stage, tick] of ticks.entries()) {
+        untilStop(b);
+        expect(b.drainEvents().filter(e => e.kind === 'special-hit')).toMatchObject([{ side, stage }]);
+        expect(b.hitStopRemaining).toBe(tick * STEP);
+        const frozen = structuredClone(b.state); b.advance(tick * STEP, 0);
+        expect(b.state).toEqual(frozen); expect(b.frameEffectDt).toBe(0);
+      }
+    }
+  });
+  it.each([1 / 30, 1 / 60, 1 / 120])('draws even a 25ms middle-stage contact before consuming the stop at dt=%s', dt => {
+    const b = duel('croissant'); b.player.meter = 100; startSpecial(b.state, 'A', []);
+    untilStop(b, dt); expect(b.hitStopRemaining).toBe(3 * STEP);
+    expect(b.player.attack!.age).toBeCloseTo(SPECIALS.croissant.windup);
+    const time = b.elapsed; b.advance(3 * STEP + STEP, 0);
+    expect(b.frameEffectDt).toBeCloseTo(STEP); expect(b.elapsed - time).toBeCloseTo(STEP);
+  });
+  it.each(['normal', 'cpu', 'middle', 'clash'] as const)('%s K.O. replaces rather than adds to the stop', mode => {
+    const b = duel(mode === 'middle' ? 'croissant' : 'shokupan');
+    if (mode === 'middle') { b.cpu.hp = 6; b.player.meter = 100; startSpecial(b.state, 'A', []); }
+    else if (mode === 'clash') { b.player.hp = b.cpu.hp = 18; b.attack('cpu'); run(b, .65); b.attack('player'); }
+    else { b[mode === 'cpu' ? 'player' : 'cpu'].hp = 18; b.attack(mode === 'cpu' ? 'cpu' : 'player'); }
+    untilStop(b); expect(b.hitStopRemaining).toBe(HIT_STOP_KO_SECONDS); expect(b.outcome).not.toBeNull();
+  });
+  it('misses, dodges and timeouts do not stop', () => {
+    const b = duel(); b.attack('cpu'); run(b, 1.5, LIMIT);
+    expect(b.events.some(e => e.kind === 'dodge')).toBe(true); expect(b.hitStopRemaining).toBe(0);
+    b.elapsed = b.limit - STEP; b.advance(STEP, LIMIT); expect(b.outcome).not.toBeNull(); expect(b.hitStopping).toBe(false);
+  });
+  it.each(['player', 'cpu'] as const)('special button readiness stays false throughout hit stop and returns on release for %s', side => {
+    // Croissant's first stage leaves the full-meter victim free of attack/recoil locks.
+    const b = duel(side === 'player' ? 'shokupan' : 'croissant', side === 'player' ? 'croissant' : 'shokupan');
+    b.player.meter = b.cpu.meter = 100; expect(b.canSpecial(side)).toBe(true);
+    expect(startSpecial(b.state, side === 'player' ? 'B' : 'A', [])).toBe(true); untilStop(b);
+    expect(b[side].attack).toBeNull(); expect(b[side].recoil).toBe(0); expect(b[side].meter).toBe(100);
+    // main.ts uses this predicate for the ready class, label and aria-disabled.
+    expect(b.canSpecial(side)).toBe(false); expect(b.special(side)).toBe(false);
+    b.advance(b.hitStopRemaining - STEP, 0); expect(b.hitStopping).toBe(true); expect(b.canSpecial(side)).toBe(false);
+    b.advance(b.hitStopRemaining, 0); expect(b.hitStopping).toBe(false); expect(b.canSpecial(side)).toBe(true);
+    expect(b.special(side)).toBe(true);
+  });
+  it.each([false, true])('drops attack/special on a frame that starts stopped and uses the latest target; special=%s', special => {
+    // The first croissant stage leaves the defender free to act as soon as the stop ends.
+    const b = duel('shokupan', 'croissant'); b.cpu.meter = 100; b.player.meter = 100; startSpecial(b.state, 'B', []); untilStop(b); b.drainEvents();
+    const frozen = structuredClone(b.state); b.advance(STEP, LIMIT, true, special);
+    expect(b.state).toEqual(frozen); expect(b.frameEffectDt).toBe(0);
+    b.advance(b.hitStopRemaining + STEP, -LIMIT, true, special);
+    expect(b.player.attack).toBeNull(); expect(b.player.meter).toBe(100); expect(b.freezing).toBe(false);
+    expect(b.player.x).toBeLessThan(0); expect(b.frameEffectDt).toBeCloseTo(STEP); expect(b.elapsed - frozen.elapsed).toBeCloseTo(STEP);
+    expect(b.drainEvents().some(e => e.side === 'player' && ['attack', 'special'].includes(e.kind))).toBe(false);
+    b.advance(STEP, LIMIT); expect(b.player.x).toBeCloseTo(0);
+  });
+  it('pause and a stalled frame retain the stop and CPU timers, with no backlog on resume', () => {
+    const b = duel(); b.attack('player'); untilStop(b); b.cpuEnabled = true;
+    const hidden = b as unknown as { nextCpu: number; nextMove: number; seed: number };
+    const frozen = structuredClone(b.state), timers = [hidden.nextCpu, hidden.nextMove, hidden.seed], left = b.hitStopRemaining;
+    b.advance(.3, LIMIT, true, true); expect(b.paused).toBe(true); expect(b.hitStopRemaining).toBe(left);
+    b.advance(.2, LIMIT); expect(b.state).toEqual(frozen); expect(b.frameEffectDt).toBe(0);
+    b.setPaused(false); b.advance(left / 2, LIMIT); expect([hidden.nextCpu, hidden.nextMove, hidden.seed]).toEqual(timers); expect(b.state).toEqual(frozen);
+    b.setPaused(true); b.advance(.2, 0); b.setPaused(false); b.advance(b.hitStopRemaining, 0);
+    expect(b.state).toEqual(frozen); b.advance(STEP, 0); expect(b.elapsed - frozen.elapsed).toBeCloseTo(STEP);
+  });
+});
 describe('3D contact and battle rules', () => {
   it.each([false, true])('hit stop freezes both fighters and the clock, including practice=%s', practice => {
     const b = duel(); b.practice = practice; b.attack('player');
@@ -15,11 +107,12 @@ describe('3D contact and battle rules', () => {
     expect(b.state).toEqual(frozen); expect([pose(b.player, 'player'), pose(b.cpu, 'cpu')]).toEqual(poses);
     b.advance(STEP, 0); expect(b.elapsed - frozen.elapsed).toBeCloseTo(STEP);
   });
-  it('stops once for a clash and consumes frame remainder instead of catching up after the stop', () => {
+  it('stops once for a clash without catching up after the stop', () => {
     const b = duel(); b.attack('cpu'); run(b, .65); b.attack('player');
     while (!b.events.some(e => e.kind === 'clash')) b.advance(STEP, 0);
-    const frozen = structuredClone(b.state); b.advance(.06, 0); expect(b.state).toEqual(frozen);
-    b.advance(.01 + STEP, 0); expect(b.elapsed - frozen.elapsed).toBeCloseTo(STEP);
+    expect(b.hitStopRemaining).toBe(HIT_STOP_CLASH_SECONDS);
+    const frozen = structuredClone(b.state); b.advance(HIT_STOP_CLASH_SECONDS, 0); expect(b.state).toEqual(frozen);
+    b.advance(STEP, 0); expect(b.elapsed - frozen.elapsed).toBeCloseTo(STEP);
   });
   it('idle never causes damage; a single swing contacts only once', () => {
     const b = duel(); run(b, 2); expect(b.cpu.hp).toBe(100); b.attack('player');

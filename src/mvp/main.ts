@@ -33,7 +33,7 @@ let renderer: TableRenderer | undefined; let ready = false; let fatal = ''; let 
 let practiceRequested = false; let calibrationReturn: Screen = 'select'; let permissionToken = 0; let permissionBusy = false;
 let countdown = 3; let last = performance.now(); let toastUntil = 0; let previousBest: Partial<Scores> = {};
 let practiceStage = 0; let acceptedAt: number | null = null;
-let stats = emptyStats(); let finishLeft = 0; let lastCount = 0; let thumbs: Partial<Record<FighterId, string>> = {};
+let stats = emptyStats(); let finishLeft = 0; let finishHitStopLeft = 0; let lastCount = 0; let thumbs: Partial<Record<FighterId, string>> = {};
 // Challenge state: the store, whether the current battle is a challenge stage, the entrance clock, the ending clock and the last stage's outcome.
 const challenge = new ChallengeStore(); let inChallenge = false; let challengeRequested = false; let challengePick: BreadId = 'shokupan';
 // Presentation clock for idle motion off the combat clock (breads bobbing, plate wobble): it stops while paused or hidden.
@@ -140,6 +140,9 @@ function landedStages(side: Side): number { let mask = battle[side].attack?.spec
 function hurt(side: Side): void {
   const element = document.querySelector<HTMLElement>(`#${side === 'player' ? 'player' : 'cpu'}-health`)?.closest<HTMLElement>('.health');
   if (element) restart(element, 'hurt');
+}
+function beginFinish(): void {
+  finishLeft = reduced.matches ? .5 : .9; finishHitStopLeft = battle.hitStopRemaining; transition('finish');
 }
 function enterResult(): void {
   const champion = inChallenge && !!stageOutcome?.boss && stageOutcome.won;
@@ -460,7 +463,7 @@ function settleStage(): void {
   challenge.update(d => ({ ...d, run: next, records: recordClear(d.records, next) }));
   if (won) assistNext = false;
   if (challenge.warning) say(challenge.warning, 3);
-  prepareShare(); finishLeft = reduced.matches ? .5 : .9; transition('finish');
+  prepareShare(); beginFinish();
 }
 async function action(actionName: string): Promise<void> {
   audio.unlock();
@@ -566,8 +569,9 @@ function frame(now: number): void {
   if (!rotate.hidden && !isLandscape()) rotate.hidden = true;
   if (screen === 'finish') {
     if (!document.hidden && renderer) {
-      finishLeft -= Math.min(dt, .1);
-      try { renderer.render(battle, battle.elapsed, Math.min(dt, .1), true, undefined, .3); updateYouFace(); }
+      const frameDt = Math.min(dt, .1), stopped = Math.min(frameDt, finishHitStopLeft);
+      finishLeft -= frameDt; finishHitStopLeft = Math.max(0, finishHitStopLeft - stopped);
+      try { renderer.render(battle, battle.elapsed, frameDt, true, { effectDt: frameDt - stopped, hitStopping: finishHitStopLeft > 1e-9, replayDt: stopped, charging: battle.cpuCharging }, .3); updateYouFace(); }
       catch { fail('3D画面を描画できません。再読み込みを試してください。'); return; }
       if (finishLeft <= 0) { if (renderer.startReplay()) transition('replay'); else enterResult(); }
     }
@@ -616,14 +620,13 @@ function frame(now: number): void {
   if (active && input.mode === 'sensor' && !input.sensor.fresh(now)) pause('動きの入力が途切れました。入力を確認してから再開してください。');
   if (screen === 'battle' || screen === 'practice') {
     const hpBefore = [battle.player.hp, battle.cpu.hp] as const;
-    const attack = input.consume(), special = input.consumeSpecial(), specialOk = special && battle.canSpecial('player');
-    if (special && !specialOk && !battle.freezing && now - lastReject > 600) { lastReject = now; say(specialReason(), .9); }
-    if (specialOk) acceptedAt = performance.now();
-    else if (attack && battle.freezing) { /* Dropped during the cut-in, like every other input. */ }
-    else if (attack && !battle.player.attack && battle.player.recoil <= 0) acceptedAt = input.detectedAt;
-    else if (attack && now - lastReject > 900) { lastReject = now; say(battle.player.recoil > 0 ? '弾かれ中 · 少し待って振ろう' : '振り切り中 · 戻ってから振ろう', .7); }
+    const attack = input.consume(), special = input.consumeSpecial(), specialOk = special && battle.canSpecial('player'), dropping = battle.freezing || battle.hitStopping;
+    if (special && !specialOk && !battle.freezing && !battle.hitStopping && now - lastReject > 600) { lastReject = now; say(specialReason(), .9); }
     battle.advance(dt, input.target(), attack, special);
     const events = battle.drainEvents(), countered = new Set(events.filter(e => e.kind === 'counter').map(e => e.side));
+    if (events.some(e => e.side === 'player' && e.kind === 'special')) acceptedAt = performance.now();
+    else if (events.some(e => e.side === 'player' && e.kind === 'attack')) acceptedAt = input.detectedAt;
+    else if (attack && !dropping && now - lastReject > 900) { lastReject = now; say(battle.player.recoil > 0 ? '弾かれ中 · 少し待って振ろう' : '振り切り中 · 戻ってから振ろう', .7); }
     const specialHits = new Set(events.filter(e => e.kind === 'special-hit' && finalStage(e)).map(e => e.side));
     const started = events.filter(e => e.kind === 'special').map(e => e.side);
     if (started.length) { showCutin(started.length > 1 ? 'both' : started[0]!); audio.duck(CUTIN_SECONDS + .2); }
@@ -684,7 +687,8 @@ function frame(now: number): void {
       // A paused entrance keeps showing its current frame; result screens advance the ending pose clock.
       if (['result', 'run-result'].includes(screen)) renderer.tickEnding(Math.min(dt, .1));
       const heldIntro = screen === 'pause' && resumeScreen === 'intro' ? introFrame(introClock, introShort) : null;
-      renderer.render(battle, active ? battle.elapsed : idleClock, active ? Math.min(dt, .1) : 0, active && !battle.paused, { ...(battle.practice ? {} : { remaining: battle.limit - battle.elapsed }), cue: stanceCue(), frozen: battle.freezing, charging: battle.cpuCharging, heat: heat(), intro: heldIntro });
+      renderer.render(battle, active ? battle.elapsed : idleClock, active ? Math.min(dt, .1) : 0, active && !battle.paused, { ...(battle.practice ? {} : { remaining: battle.limit - battle.elapsed }), cue: stanceCue(), frozen: battle.freezing, charging: battle.cpuCharging, heat: heat(), intro: heldIntro,
+        effectDt: battle.freezing ? Math.min(dt, .1) : active ? Math.min(battle.frameEffectDt, .1) : 0, hitStopping: battle.hitStopping, replayDt: active ? Math.min(dt, .1) : 0 });
       if (acceptedAt !== null) { renderer.noteLatency(performance.now() - acceptedAt); acceptedAt = null; }
       updateYouFace();
       if (battle.outcome && screen === 'battle' && inChallenge) settleStage();
@@ -692,7 +696,7 @@ function frame(now: number): void {
         previousBest = save.record(battle, input.mode);
         const input_ = { outcome: battle.outcome, hpRatio: battle.player.hp / BREADS[battle.player.bread].hp, scores: battle.scores, stats }, score = matchScore(input_);
         result = { score, rank: rankOf(score, input_), previous: save.recordScore(battle, input.mode, score), tip: nextTip(input_, battle.difficulty === 'hard') };
-        prepareShare(); finishLeft = reduced.matches ? .5 : .9; transition('finish');
+        prepareShare(); beginFinish();
       }
     } catch { fail('3D画面を描画できません。再読み込みを試してください。'); }
   }

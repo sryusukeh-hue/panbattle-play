@@ -15,8 +15,10 @@ interface Actor extends Model { stage: number; displayStage: number; displayHeat
   // Face (plans/EXECPLAN-FACE.md): the glued eyes/lids/decal and the expression state.
   rig: FaceRig; expression: FaceState }
 interface ActorFrame { position: THREE.Vector3Tuple; rotation: THREE.Vector3Tuple; height: number; bend: number; direction: number[]; impact: number; hit: number; stage: number; positions: Float32Array; normals: Float32Array;
+  // Replay follows the recorded mode when omitting hit effects after a motion-preference change.
+  hitStopEffects: boolean; rotationWithoutHit: THREE.Vector3Tuple; bendWithoutHit: number;
   // Special moves: root scale and a golden wind-up glow (replayed with the pose).
-  scale: THREE.Vector3Tuple; glow: number; glowColor: string;
+  scale: THREE.Vector3Tuple; glow: number; glowColor: string; flash: number;
   // Boss second form: how far the crust has darkened toward deep toast (0..1, max 15% of the way).
   heat: number;
   // Resolved expression, copied so the replay shows the same face.
@@ -27,6 +29,8 @@ interface Accent { mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMateria
 type Mark = THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
 const sideSign = (side: Side): number => side === 'player' ? 1 : -1;
 const CAMERA_HOME = new THREE.Vector3(.9, 5.8, 7.1);
+export const HIT_FLASH_SECONDS = .04;
+export const impactStrength = (life: number): number => clamp(life / .18, 0, 1) ** 2;
 // Face-centred stills: local y of the face and how much closer than the whole-bread framing.
 const FACE_FOCUS: Record<FighterId, number> = { shokupan: .02, francepan: .43, croissant: .18, melonpan: .03, currypan: .015, creampan: .02, ikkin: .1 };
 const THUMB_CLOSE: Record<FighterId, number> = { shokupan: 1.25, francepan: 1.8, croissant: 1.25, melonpan: 1.3, currypan: 1.25, creampan: 1.25, ikkin: 1.2 };
@@ -118,9 +122,12 @@ export class TableRenderer {
   private lost = false;
   private feedback = new BattleFeedback();
   private accents: Accent[] = [];
-  private impacts: Partial<Record<Side, { life: number; direction: THREE.Vector3 }>> = {};
+  private impacts: Partial<Record<Side, { life: number; direction: THREE.Vector3; strength?: number }>> = {};
+  private hitFlashes: Partial<Record<Side, number>> = {};
   private contacts: Partial<Record<Side, THREE.Vector3>> = {};
-  private shake = 0; private zoom = 0;
+  private shake = 0; private zoom = 0; private zoomAmount = 0;
+  // Only CPU/practice opts into synchronized hit effects; online keeps its presentation.
+  private hitStopEffects = false;
   private replay = new ReplayBuffer<Record<Side, ActorFrame>>();
   private previous: Partial<Record<Side, { id: number; x: number; z: number }>> = {};
   private reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -343,8 +350,9 @@ export class TableRenderer {
     // Special moves drive the whole root; reduced motion keeps the XZ path and hit timing but drops the jump, growth and spin.
     const lift = sp ? calm ? 0 : p.y - 1.43 : Math.sin(time * 2.2 + (side === 'cpu' ? 1 : 0)) * .025;
     m.mesh.position.set(p.x, intro ? intro.bossY : 1.43 + lift, p.z);
-    m.mesh.rotation.set(p.lean + Math.sin(f.hit * 75) * f.hit * .12, (side === 'player' ? Math.PI + .12 : -.08) + (sp ? sideSign(side) * sp.yaw : 0),
-      Math.sin(f.hit * 55) * f.hit * .1 + (sp && !calm ? sideSign(side) * sp.roll : 0));
+    const hit = calm && this.hitStopEffects ? 0 : f.hit;
+    m.mesh.rotation.set(p.lean, (side === 'player' ? Math.PI + .12 : -.08) + (sp ? sideSign(side) * sp.yaw : 0),
+      sp && !calm ? sideSign(side) * sp.roll : 0);
     if (side === 'cpu' && phase(f) === 'windup' && !f.attack!.special && !calm) m.mesh.rotation.x -= .06 * Math.sin(Math.PI * f.attack!.age / f.attack!.windup);
     const scale: THREE.Vector3Tuple = intro ? [intro.squash[0], intro.squash[1], intro.squash[2]] : sp && !calm ? [sp.scale[0], sp.scale[1], sp.scale[2]] : [1, 1, 1];
     // Golden glow builds through the wind-up, flashes on the strike and fades out in recovery.
@@ -368,6 +376,8 @@ export class TableRenderer {
         m.mesh.rotation.z += (side === 'player' ? -1 : 1) * (.62 * fall + sway); m.mesh.position.y -= .52 * fall;
       } else m.mesh.rotation.y = base + turn * (calm ? 1 : Math.min(1, t / .5));
     }
+    const rotationWithoutHit: THREE.Vector3Tuple = [m.mesh.rotation.x, m.mesh.rotation.y, m.mesh.rotation.z];
+    m.mesh.rotation.x += Math.sin(hit * 75) * hit * .12; m.mesh.rotation.z += Math.sin(hit * 55) * hit * .1;
     const stage = damageStage(f.hp, b.hp);
     if (stage !== m.stage) {
       if (stage < m.stage) m.dents = [];
@@ -378,11 +388,13 @@ export class TableRenderer {
       m.wornPositions = new Float32Array(m.mesh.geometry.attributes.position!.array); m.wornNormals = new Float32Array(m.mesh.geometry.attributes.normal!.array); m.stage = stage;
     }
     const contact = this.impacts[side], direction = contact ? contact.direction.clone().applyQuaternion(m.mesh.quaternion.clone().invert()).toArray() : [0, 0, 1];
-    const impact = contact ? Math.sin(Math.PI * clamp(contact.life / .18, 0, 1)) : 0;
+    const impact = !contact || (calm && this.hitStopEffects) ? 0 : this.hitStopEffects
+      ? impactStrength(contact.life) * (contact.strength ?? 1) : Math.sin(Math.PI * clamp(contact.life / .18, 0, 1));
     // Visual deformation is <= 3 cm; collision stays tied to the same controlled root pose.
-    const bend = Math.sin(Math.max(0, p.progress) * Math.PI) * .03 + Math.sin(f.hit * 60) * f.hit * .025;
+    const bendWithoutHit = Math.sin(Math.max(0, p.progress) * Math.PI) * .03, bend = bendWithoutHit + Math.sin(hit * 60) * hit * .025;
     const frame: ActorFrame = { position: m.mesh.position.toArray(), rotation: [m.mesh.rotation.x, m.mesh.rotation.y, m.mesh.rotation.z], height: b.height,
-      bend, direction, impact, hit: f.hit, stage, positions: m.wornPositions, normals: m.wornNormals, scale, glow, glowColor: charge ? '#ff5a36' : spec.color,
+      bend, hitStopEffects: this.hitStopEffects, rotationWithoutHit, bendWithoutHit, direction, impact, hit: f.hit, stage, positions: m.wornPositions, normals: m.wornNormals, scale, glow, glowColor: charge ? '#ff5a36' : spec.color,
+      flash: this.hitStopEffects && !calm ? clamp((this.hitFlashes[side] ?? 0) / HIT_FLASH_SECONDS, 0, 1) : 0,
       heat: side === 'cpu' ? this.heat : 0, face: copyFace(m.expression.update(dt, this.faceInput(f, side, other, charge, stage), calm)) };
     // Asleep until its eyes open in the entrance.
     if (intro) frame.face.open = [frame.face.open[0] * intro.eyes, frame.face.open[1] * intro.eyes];
@@ -398,8 +410,10 @@ export class TableRenderer {
     return { phase: this.ending ? 'ready' : phase(f), special: !!f.attack?.special, charging, stage, ending, look: [look.x * 2.2, look.y * 2.2], heated: side === 'cpu' && this.heat > .5 };
   }
   private drawActor(side: Side, frame: ActorFrame): void {
-    const m = this.actors[side]!, { bend, direction, impact, height } = frame;
-    m.mesh.position.fromArray(frame.position); m.mesh.rotation.set(...frame.rotation); m.mesh.scale.set(...frame.scale);
+    const m = this.actors[side]!, { direction, height } = frame, calm = this.reducedMotion.matches && frame.hitStopEffects;
+    const rotation = calm ? frame.rotationWithoutHit : frame.rotation, bend = calm ? frame.bendWithoutHit : frame.bend;
+    const impact = calm ? 0 : frame.impact, flash = calm ? 0 : frame.flash;
+    m.mesh.position.fromArray(frame.position); m.mesh.rotation.set(...rotation); m.mesh.scale.set(...frame.scale);
     const pos = m.mesh.geometry.attributes.position!, normal = m.mesh.geometry.attributes.normal!;
     // Colours are always rebuilt from the originals (never compounded): damage darkening, then the boss's toasting.
     const heat = Math.round(frame.heat * 20) / 20;
@@ -420,7 +434,8 @@ export class TableRenderer {
     }
     pos.needsUpdate = true; normal.needsUpdate = true;
     m.rig.update(frame.face, pos, normal);
-    if (frame.hit > 0) { m.mesh.material.emissive.set('#d95d27'); m.mesh.material.emissiveIntensity = frame.hit * 1.5; }
+    if (flash > 0) { m.mesh.material.emissive.set('#ffffff'); m.mesh.material.emissiveIntensity = flash * .30; }
+    else if (frame.hit > 0) { m.mesh.material.emissive.set('#d95d27'); m.mesh.material.emissiveIntensity = frame.hit * 1.5; }
     else { m.mesh.material.emissive.set(frame.glow > 0 ? frame.glowColor : '#000000'); m.mesh.material.emissiveIntensity = frame.glow * .8; }
     const shadow = this.shadows[side === 'player' ? 0 : 1]!; shadow.position.x = frame.position[0]; shadow.position.z = frame.position[2];
   }
@@ -436,7 +451,7 @@ export class TableRenderer {
     if (event.kind === 'special' || event.kind === 'special-hit' || (event.kind === 'miss' && event.special)) { this.specialAccent(event, battle); return; }
     if (this.reducedMotion.matches) return;
     if (event.kind === 'dodge' || event.kind === 'counter') {
-      if (event.kind === 'counter') this.zoom = .24;
+      if (event.kind === 'counter') { this.zoom = this.hitStopEffects ? .12 : .24; this.zoomAmount = Math.max(this.zoomAmount, .075); }
       const counter = event.kind === 'counter', duration = counter ? .25 : .2;
       const mesh = new THREE.Mesh(new THREE.RingGeometry(.35, .40, 40, 1, counter ? 0 : .2, counter ? Math.PI * 2 : Math.PI * 1.3),
         new THREE.MeshBasicMaterial({ color: counter ? '#ffcd69' : '#f1fff1', transparent: true, opacity: .9, side: THREE.DoubleSide, depthWrite: false }));
@@ -445,11 +460,15 @@ export class TableRenderer {
     }
     if (event.kind !== 'hit' && event.kind !== 'clash') return;
     this.shake = Math.max(this.shake, .14);
+    if (this.hitStopEffects && (!event.guard || battle.player.hp <= 0 || battle.cpu.hp <= 0)) {
+      this.zoom = .12; this.zoomAmount = Math.max(this.zoomAmount, battle.player.hp <= 0 || battle.cpu.hp <= 0 ? .09 : .045);
+    }
     for (const side of ['player', 'cpu'] as const) {
       const own = pose(battle[side], side), other = pose(battle[side === 'player' ? 'cpu' : 'player'], side === 'player' ? 'cpu' : 'player');
-      this.impacts[side] = { life: .18, direction: new THREE.Vector3(other.x - own.x, 0, other.z - own.z).normalize() };
+      this.impacts[side] = { life: .18, direction: new THREE.Vector3(other.x - own.x, 0, other.z - own.z).normalize(), strength: event.kind === 'clash' || side !== event.side ? 1 : .3 };
+      if (this.hitStopEffects && !event.guard && (event.kind === 'clash' || side !== event.side)) this.hitFlashes[side] = HIT_FLASH_SECONDS;
     }
-    for (let i = 0; i < 12; i++) this.crumb(battle[event.kind === 'clash' ? i % 2 ? 'player' : 'cpu' : event.side === 'player' ? 'cpu' : 'player'].bread, event.x, 1.45, event.z, i);
+    for (let i = 0; i < (this.hitStopEffects && event.guard ? 3 : 12); i++) this.crumb(battle[event.kind === 'clash' ? i % 2 ? 'player' : 'cpu' : event.side === 'player' ? 'cpu' : 'player'].bread, event.x, 1.45, event.z, i);
   }
   // Expressions: the bread that got hit winces (hit/special-hit name the attacker), a clash grits both, dodge/counter grin.
   private faceReaction(event: BattleEvent): void {
@@ -494,9 +513,11 @@ export class TableRenderer {
     this.impacts[victim] = { life: .18, direction: new THREE.Vector3(0, 0, -sideSign(attacker)) };
     this.flash(new THREE.RingGeometry(final ? .18 : .1, final ? .5 : .28, 10), '#ffffff', point, final ? .24 : .14, { face: true, grow: calm ? 0 : final ? 2.8 : 1.4 });
     if (calm) return;
+    if (this.hitStopEffects) this.hitFlashes[victim] = HIT_FLASH_SECONDS;
     const count = BURST[bread][final ? 1 : 0];
     for (let i = 0; i < count; i++) this.crumb(battle[victim].bread, event.x, 1.45, event.z, i, final ? 1.7 : 1.1);
-    if (final) { this.shake = Math.max(this.shake, bread === 'croissant' ? .1 : .14); this.zoom = .24; }
+    if (final) { this.shake = Math.max(this.shake, bread === 'croissant' ? .1 : .14); this.zoom = this.hitStopEffects ? .12 : .24; this.zoomAmount = Math.max(this.zoomAmount, .075); }
+    if (this.hitStopEffects && (battle.player.hp <= 0 || battle.cpu.hp <= 0)) { this.zoom = .12; this.zoomAmount = .09; }
   }
   private removeCrumb(index: number): void {
     const c = this.crumbs[index]!; this.scene.remove(c.mesh); c.mesh.geometry.dispose(); (c.mesh.material as THREE.Material).dispose(); this.crumbs.splice(index, 1);
@@ -526,11 +547,12 @@ export class TableRenderer {
       this.flash(new THREE.RingGeometry(.7, .8, 36).rotateX(-Math.PI / 2), '#fff6dc', new THREE.Vector3(p.x, .06, p.z), .4, { grow: calm ? 0 : 1.6, peak: .7 });
     }
   }
-  private cameraEffect(dt: number): void {
+  private cameraEffect(dt: number, hitStopping = false): void {
     this.shake = Math.max(0, this.shake - dt); this.zoom = Math.max(0, this.zoom - dt);
-    const shake = this.reducedMotion.matches ? 0 : VISUAL_LIMITS.shake * Math.min(1, this.shake / .14) * Math.sin(this.shake * 140);
+    const shake = this.reducedMotion.matches || hitStopping ? 0 : VISUAL_LIMITS.shake * Math.min(1, this.shake / .14) * Math.sin(this.shake * 140);
     // The cut-in leans the camera in slightly; combined with hit zoom it never exceeds the shared zoom limit.
-    const zoom = this.reducedMotion.matches ? 0 : Math.min(VISUAL_LIMITS.zoom, VISUAL_LIMITS.zoom * Math.sin(Math.PI * this.zoom / .24) + VISUAL_LIMITS.zoom * .8 * this.focus);
+    const zoom = this.reducedMotion.matches ? 0 : Math.min(VISUAL_LIMITS.zoom, (this.hitStopEffects ? this.zoomAmount * clamp(this.zoom / .12, 0, 1) : VISUAL_LIMITS.zoom * Math.sin(Math.PI * this.zoom / .24)) + VISUAL_LIMITS.zoom * .8 * this.focus);
+    if (this.zoom <= 0) this.zoomAmount = 0;
     // Result screen: tilt down so the celebrating breads sit above the result sheet.
     const tilt = !this.ending?.tilt ? 0 : this.reducedMotion.matches ? 1 : 1 - (1 - Math.min(1, (this.endingClock - this.ending.tiltFrom) / .9)) ** 3;
     if (this.intro) {
@@ -557,7 +579,8 @@ export class TableRenderer {
     for (const effect of [...this.crumbs, ...this.accents]) {
       this.scene.remove(effect.mesh); effect.mesh.geometry.dispose(); (effect.mesh.material as THREE.Material).dispose();
     }
-    this.crumbs = []; this.accents = []; this.previous = {}; this.impacts = {}; this.shake = this.zoom = this.focus = 0; this.cameraEffect(0); this.marker.visible = false;
+    this.crumbs = []; this.accents = []; this.previous = {}; this.impacts = {}; this.hitFlashes = {}; this.shake = this.zoom = this.zoomAmount = this.focus = 0; this.cameraEffect(0); this.marker.visible = false;
+    for (const m of Object.values(this.actors)) { m.mesh.material.emissive.set('#000000'); m.mesh.material.emissiveIntensity = 0; }
     for (const set of Object.values(this.marks ?? {})) for (const mark of Object.values(set).flat()) mark.visible = false;
     for (const mesh of [...(this.bossLane ?? []), ...(this.steam ?? [])]) mesh.visible = false;
   }
@@ -579,13 +602,14 @@ export class TableRenderer {
   // local.frozen: the special cut-in is playing; nothing is recorded for the replay and effects drift in slow motion.
   // local.charging: the CPU's once-per-match meter charge is running (it glows).
   // local.heat: the boss's second-form toasting (0..1); local.intro: the boss entrance frame (owns camera and boss pose).
-  render(battle: BattleView, time: number, frameDt: number, active: boolean, local?: { remaining?: number; cue?: StanceCue; frozen?: boolean; charging?: boolean; heat?: number; intro?: IntroFrame | null }, timeScale = 1): void {
+  render(battle: BattleView, time: number, frameDt: number, active: boolean, local?: { remaining?: number; cue?: StanceCue; frozen?: boolean; charging?: boolean; heat?: number; intro?: IntroFrame | null; effectDt?: number; hitStopping?: boolean; replayDt?: number }, timeScale = 1): void {
     if (this.lost) return;
-    const dt = frameDt * timeScale * (local?.frozen ? .15 : 1);
+    this.hitStopEffects = local?.effectDt !== undefined;
+    const dt = (local?.effectDt ?? frameDt) * timeScale * (local?.frozen ? .15 : 1);
     // The toasting persists across screens that pass no heat (finish, champion); a new match resets it.
     if (local?.heat !== undefined) this.heat = local.heat;
     this.intro = local?.intro ?? null;
-    this.focus = clamp(this.focus + (local?.frozen ? 1 : -1) * frameDt * 6, 0, 1); this.charging = !!local?.charging;
+    this.focus = clamp(this.focus + (local?.frozen ? 1 : -1) * (local?.hitStopping ? 0 : frameDt) * 6, 0, 1); this.charging = !!local?.charging;
     const feedback = this.feedback.update(battle, active, local?.remaining);
     if (!active && !this.intro) this.resetEffects();
     else if (active) {
@@ -600,9 +624,10 @@ export class TableRenderer {
     const player = this.actor(battle.player, 'player', time, faceDt, battle.cpu), cpu = this.actor(battle.cpu, 'cpu', time, faceDt, battle.player);
     const face = player.face;
     this.mood = face.mouth === 'ouch' ? 'ouch' : face.mouth === 'smug' ? 'dodge' : battle.player.attack?.special && !this.ending ? 'special' : 'calm';
-    if (active && local && !local.frozen) this.replay.record(dt, { player, cpu });
-    this.cameraEffect(dt);
+    if (active && local && !local.frozen && (local.replayDt === undefined || local.replayDt > 0)) this.replay.record(local.replayDt ?? dt, { player, cpu });
+    this.cameraEffect(dt, local?.hitStopping);
     for (const impact of Object.values(this.impacts)) impact.life = Math.max(0, impact.life - dt);
+    for (const side of ['player', 'cpu'] as const) this.hitFlashes[side] = Math.max(0, (this.hitFlashes[side] ?? 0) - dt);
     this.updateStance(battle, active ? local?.cue : undefined, time);
     const a = battle.cpu.attack;
     // The boss lane stays until its hit window closes, so its disappearing means "safe — strike back now".
